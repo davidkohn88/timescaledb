@@ -48,15 +48,16 @@ create_chunk_range_table_entry(ChunkDispatch *dispatch, Relation rel)
 		rti++;
 	}
 	
-	hypertable_rte = rt_fetch(dispatch->hypertable_result_rel_info->ri_RangeTableIndex, estate->es_range_table);
 
 	rte = makeNode(RangeTblEntry);
 	rte->rtekind = RTE_RELATION;
 	rte->relid = RelationGetRelid(rel);
 	rte->relkind = rel->rd_rel->relkind;
 	rte->requiredPerms = ACL_INSERT;
-	rte->eref = hypertable_rte->eref;
-	
+	if (NULL != estate->es_range_table) {
+		hypertable_rte = rt_fetch(dispatch->hypertable_result_rel_info->ri_RangeTableIndex, estate->es_range_table);
+		rte->eref = hypertable_rte->eref;
+	}
 		
 	/*
 	 * If this is the first tuple, we make a copy of the range table to avoid
