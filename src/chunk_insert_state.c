@@ -30,7 +30,6 @@ create_chunk_range_table_entry(ChunkDispatch *dispatch, Relation rel)
 	Index		rti = 1;
 	EState	   *estate = dispatch->estate;
 
-
 	/*
 	 * Check if we previously created an entry for this relation. This can
 	 * happen if we close a chunk insert state and then reopen it in the same
@@ -41,11 +40,12 @@ create_chunk_range_table_entry(ChunkDispatch *dispatch, Relation rel)
 	foreach(lc, estate->es_range_table)
 	{
 		rte = lfirst(lc);
-
+		
 		if (rte->relid == RelationGetRelid(rel))
 			return rti;
 		rti++;
 	}
+	
 
 
 	rte = makeNode(RangeTblEntry);
@@ -53,7 +53,11 @@ create_chunk_range_table_entry(ChunkDispatch *dispatch, Relation rel)
 	rte->relid = RelationGetRelid(rel);
 	rte->relkind = rel->rd_rel->relkind;
 	rte->requiredPerms = ACL_INSERT;
-
+	if (NULL != estate->es_range_table) {
+		hypertable_rte = rt_fetch(dispatch->hypertable_result_rel_info->ri_RangeTableIndex, estate->es_range_table);
+		rte->eref = hypertable_rte->eref;
+	}
+		
 	/*
 	 * If the hypertable has a rangetable entry, copy some information from
 	 * its eref to the chunk's eref so that explain analyze works correctly.

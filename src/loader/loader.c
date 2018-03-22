@@ -124,8 +124,8 @@ should_load_on_alter_extension(Node *utility_stmt)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("extension \"%s\" cannot be updated after the old version has already been loaded", stmt->extname),
-				 errhint("You should start a new session and execute ALTER EXTENSION as the first command")));
-
+				 errhint("Start a new session and execute ALTER EXTENSION as the first command. "
+						 "Make sure to pass the \"-X\" flag to psql.")));
 	/* do not load the current (old) version's .so */
 	return false;
 }
@@ -159,9 +159,10 @@ should_load_on_create_extension(Node *utility_stmt)
 	/* disallow loading two .so from different versions */
 	ereport(ERROR,
 			(errcode(ERRCODE_DUPLICATE_OBJECT),
-			 errmsg("the session already has another shared library loaded for extension \"%s\"", stmt->extname),
-			 errdetail("The loaded version is \"%s\"", soversion),
-			 errhint("You should start a new session and execute CREATE EXTENSION as the first command")));
+			 errmsg("extension \"%s\" has already been loaded with another version", stmt->extname),
+			 errdetail("The loaded version is \"%s\".", soversion),
+			 errhint("Start a new session and execute CREATE EXTENSION as the first command. "
+					 "Make sure to pass the \"-X\" flag to psql.")));
 	return false;
 }
 
@@ -212,33 +213,21 @@ post_analyze_hook(ParseState *pstate, Query *query)
 	}
 }
 
+static void
+extension_mark_loader_present()
+{
+	SetConfigOption(GUC_LOADER_PRESENT_NAME, "on", PGC_USERSET, PGC_S_SESSION);
+}
+
 void
 _PG_init(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
 	{
-		/* cannot use GUC variable here since extension not yet loaded */
-		char	   *allow_install_without_preload = GetConfigOptionByName("timescaledb.allow_install_without_preload", NULL, true);
-
-		if (allow_install_without_preload == NULL ||
-			strcmp(allow_install_without_preload, "on") != 0)
-		{
-			char	   *config_file = GetConfigOptionByName("config_file", NULL, false);
-
-			ereport(ERROR,
-					(errmsg("The timescaledb library is not preloaded"),
-					 errhint("Please preload the timescaledb library via shared_preload_libraries.\n\n"
-							 "This can be done by editing the config file at: %1$s\n"
-							 "and adding 'timescaledb' to the list in the shared_preload_libraries config.\n"
-							 "	# Modify postgresql.conf:\n	shared_preload_libraries = 'timescaledb'\n\n"
-							 "Another way to do this, if not preloading other libraries, is with the command:\n"
-							 "	echo \"shared_preload_libraries = 'timescaledb'\" >> %1$s \n\n"
-							 "(Will require a database restart.)\n\n"
-							 "If you REALLY know what you are doing and would like to load the library without preloading, you can disable this check with: \n"
-							 "	SET timescaledb.allow_install_without_preload = 'on';", config_file)));
-			return;
-		}
+		extension_load_without_preload();
 	}
+	extension_mark_loader_present();
+
 	elog(INFO, "timescaledb loaded");
 
 	/* This is a safety-valve variable to prevent loading the full extension */
