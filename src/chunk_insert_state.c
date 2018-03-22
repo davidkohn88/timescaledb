@@ -28,8 +28,7 @@ create_chunk_range_table_entry(ChunkDispatch *dispatch, Relation rel)
 	RangeTblEntry *rte;
 	ListCell   *lc;
 	Index		rti = 1;
-	EState *estate = dispatch->estate;
-	RangeTblEntry *hypertable_rte;
+	EState	   *estate = dispatch->estate;
 
 
 	/*
@@ -42,23 +41,31 @@ create_chunk_range_table_entry(ChunkDispatch *dispatch, Relation rel)
 	foreach(lc, estate->es_range_table)
 	{
 		rte = lfirst(lc);
-		
+
 		if (rte->relid == RelationGetRelid(rel))
 			return rti;
 		rti++;
 	}
-	
+
 
 	rte = makeNode(RangeTblEntry);
 	rte->rtekind = RTE_RELATION;
 	rte->relid = RelationGetRelid(rel);
 	rte->relkind = rel->rd_rel->relkind;
 	rte->requiredPerms = ACL_INSERT;
-	if (NULL != estate->es_range_table) {
+
+	/*
+	 * If the hypertable has a rangetable entry, copy some information from
+	 * its eref to the chunk's eref so that explain analyze works correctly.
+	 */
+	if (0 != dispatch->hypertable_result_rel_info->ri_RangeTableIndex)
+	{
+		RangeTblEntry *hypertable_rte;
+
 		hypertable_rte = rt_fetch(dispatch->hypertable_result_rel_info->ri_RangeTableIndex, estate->es_range_table);
 		rte->eref = hypertable_rte->eref;
 	}
-		
+
 	/*
 	 * If this is the first tuple, we make a copy of the range table to avoid
 	 * modifying the old list.
