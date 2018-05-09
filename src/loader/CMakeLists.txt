@@ -1,8 +1,16 @@
 set(HEADERS
+  tsbgw_message_queue.h
+  tsbgw_counter.h
+  tsbgw_launcher.h
+  tsbgw_interface.h
 )
 
 set(SOURCES
-  loader.c)
+  loader.c
+  tsbgw_message_queue.c
+  tsbgw_counter.c
+  tsbgw_launcher.c
+  tsbgw_interface.c)
 
 add_library(${PROJECT_NAME}-loader MODULE ${SOURCES} ${HEADERS})
 
