@@ -10,17 +10,13 @@
  * shared_preload_libraries time. 
  * 
  * It contains code that will be called by the loader at two points
- *  1) Initialize a shared memory segment that has 
+ *  1) Initialize a shared memory hash table as well as a lock for that hash table. 
  *  2) Start a cluster launcher that gets the dbs in the cluster, and starts a worker for each
  *   of them. 
  * 
  *
  * 
- * So how do we deal with dependent vs independent libraries for the timescale version?
- * one possible approach: cluster launcher launches per-db interrogator workers, these workers 
- * are only responsible for populating whether timescale is installed and what version it is installed
- * at in shared memory then they launch a new worker for the db that loads the proper library 
- * as its main arg and they die?
+ * 
  * 
 */
 
@@ -44,14 +40,23 @@
 /* needed for initializing shared memory */
 #include <utils/hsearch.h>
 
+#include <storage/spin.h>
 
-/* TODO: WRITE THE SHMEM STUFF*/
+#include "timescale_bgw_launcher.h"
 
+#define TSBGW_INIT_DBS 8
+#define TSBGW_MAX_DBS 64
+#define TSBGW_LW_TRANCHE_NAME "timescale_bgw_hash_lock"
+#define TSBGW_SS_NAME "timescale_bgw_shared_state"
+#define TSBGW_HASH_NAME "timescale_bgw_shared_hash_table"
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
 
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+
+static tsbgw_shared_state *tsbgw_ss = NULL;
 
 /*
  * Signal handler for SIGTERM
@@ -84,7 +89,7 @@ timescale_bgw_sighup(SIGNAL_ARGS)
 
 	errno = save_errno;
 }
-/* Model this on autovacuum.c -> get_database_list */
+
 
 extern void register_timescale_bgw_launcher(void) {
     BackgroundWorker worker;
@@ -105,18 +110,143 @@ extern void register_timescale_bgw_launcher(void) {
     snprintf(worker.bgw_name, BGW_MAXLEN, "timescale_bgw_launcher");
 
     RegisterBackgroundWorker(&worker);
-    ereport(LOG, (errmsg("Registered Timescale BGW Launcher"))); 
+    
 }
 
+static Size tsbgw_memsize(void){
+    Size    size;
+
+    size = MAXALIGN(sizeof(tsbgw_shared_state));
+    size = add_size(size, hash_estimate_size(TSBGW_MAX_DBS, sizeof(tsbgw_hash_entry)));
+    return size;
+}
+
+
+
+/* this gets called when shared memory is initialized in a backend (shmem_startup_hook)
+ * based on pg_stat_statements.c*/
+static void timescale_bgw_shmem_startup(void){
+    bool        found;
+    
+
+    if (prev_shmem_startup_hook)
+        prev_shmem_startup_hook();
+
+
+    /* reset in case this i a restart within the postmaster */
+    tsbgw_ss = NULL;
+    
+
+    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+    tsbgw_ss = ShmemInitStruct(TSBGW_SS_NAME, sizeof(tsbgw_shared_state), &found);
+
+    if(!found) /* initialize the shared memory structure*/
+    {
+        HASHCTL     info;
+
+        memset(&info, 0, sizeof(info));
+        info.keysize = sizeof(Oid);
+        info.entrysize = sizeof(tsbgw_hash_entry);
+        
+        tsbgw_ss->lock = &(GetNamedLWLockTranche(TSBGW_LW_TRANCHE_NAME))->lock;
+        tsbgw_ss->hashtable = ShmemInitHash(TSBGW_HASH_NAME, TSBGW_INIT_DBS, TSBGW_MAX_DBS, &info, HASH_ELEM);
+        SpinLockInit(&tsbgw_ss->mutex);
+        tsbgw_ss->total_workers = 0; 
+    }
+
+    LWLockRelease(AddinShmemInitLock);
+    
+}
+
+/* Model this on autovacuum.c -> get_database_list */
+static void populate_database_htab(void){
+    List            *dblist = NIL;
+    Relation        rel;
+    HeapScanDesc    scan;
+    HeapTuple       tup;
+    MemoryContext   resultcxt;
+
+    /* don't want output in our transaction context*/
+    resultcxt = CurrentMemoryContext;
+    /* by this time we should already be connected to the db, and only have access to shared catalogs*/
+    /*start a txn, see note in autovacuum.c for why*/
+
+}
+static void increment_total_workers(void)  {
+    volatile tsbgw_shared_state *ss = (volatile tsbgw_shared_state *) tsbgw_ss;
+    SpinLockAcquire(&ss->mutex);
+    ss->total_workers++;
+    SpinLockRelease(&ss->mutex);
+}
+static void decrement_total_workers(void)  {
+    volatile tsbgw_shared_state *ss = (volatile tsbgw_shared_state *) tsbgw_ss;
+    SpinLockAcquire(&ss->mutex);
+    ss->total_workers--;
+    SpinLockRelease(&ss->mutex);
+}
+static int get_total_workers(void){
+    volatile tsbgw_shared_state *ss = (volatile tsbgw_shared_state *) tsbgw_ss;
+    int nworkers;
+    SpinLockAcquire(&ss->mutex);
+    nworkers = ss->total_workers;
+    SpinLockRelease(&ss->mutex);
+    return nworkers;
+} 
+
 extern void timescale_bgw_launcher_main(void) {
+    
+    BackgroundWorker        worker;
+    BackgroundWorkerHandle  *handle;
+    BgwHandleStatus         status;
+    pid_t                   worker_pid;
+
+
+    Oid db_id = 13267; /*postgres db oid*/
+
+
     /* Establish signal handlers before unblocking signals. */
-    ereport(LOG, (errmsg("Starting Timescale BGW Launcher")));
 	pqsignal(SIGHUP, timescale_bgw_sighup);
 	pqsignal(SIGTERM, timescale_bgw_sigterm);
     BackgroundWorkerUnblockSignals();
     /* Connect to the db, no db name yet, so can only access shared catalogs*/
-    ereport(LOG, (errmsg("BGW Launcher Signals Unblocked"))); 
+    increment_total_workers();  
+    
     BackgroundWorkerInitializeConnection(NULL, NULL);
     ereport(LOG, (errmsg("Timescale BGW Launcher Connected To DB")));
 
+    memset(&worker, 0, sizeof(worker));
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+    worker.bgw_notify_pid = MyProcPid;
+    sprintf(worker.bgw_library_name, "timescaledb");
+    sprintf(worker.bgw_function_name , "timescale_bgw_db_scheduler_main");
+    snprintf(worker.bgw_name, BGW_MAXLEN, "timescale_bgw_db_scheduler for db_id = %d", db_id);
+    worker.bgw_main_arg = db_id;
+
+    
+    RegisterDynamicBackgroundWorker(&worker, &handle);
+    status = WaitForBackgroundWorkerStartup(handle, &worker_pid);
+    ereport(LOG, (errmsg("Worker started with PID %d", worker_pid)));
+    
+}
+
+extern void timescale_bgw_db_scheduler_main(Oid db_id){
+    ereport(LOG, (errmsg("Timescale BGW DB Scheduler Started")));
+    increment_total_workers();
+    ereport(LOG, (errmsg("Total Workers = %d", get_total_workers())));
+
+    BackgroundWorkerInitializeConnectionByOid(db_id, NULL);
+    ereport(LOG, (errmsg("Connected to Database id = %d", db_id)));
+
+    decrement_total_workers();
+
+}
+/* this gets called by the loader (and therefore the postmaster) at shared_preload_libraries time*/
+extern void timescale_bgw_shmem_init(void){
+    RequestAddinShmemSpace(tsbgw_memsize());
+    RequestNamedLWLockTranche(TSBGW_LW_TRANCHE_NAME, 1);
+    prev_shmem_startup_hook = shmem_startup_hook;
+    shmem_startup_hook = timescale_bgw_shmem_startup;
 }
