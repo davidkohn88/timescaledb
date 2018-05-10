@@ -235,6 +235,8 @@ _PG_init(void)
 	extension_mark_loader_present();
 
 	elog(INFO, "timescaledb loaded");
+	
+	timescale_bgw_shmem_init();
 	register_timescale_bgw_launcher();
 
 	/* This is a safety-valve variable to prevent loading the full extension */
