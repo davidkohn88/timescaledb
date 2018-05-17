@@ -64,6 +64,7 @@ set(HEADERS
   scanner.h
   subspace_store.h
   tablespace.h
+  timescale_bgw.h
   trigger.h
   utils.h)
 
@@ -105,6 +106,7 @@ set(SOURCES
   sort_transform.c
   subspace_store.c
   tablespace.c
+  timescale_bgw.c
   trigger.c
   utils.c
   version.c)

@@ -1,5 +1,5 @@
 /* This file will be used by the versioned timescaledb extension and the loader
- * Because we want the loader not to export symbols all files here should be static
+ * Because we want the loader not to export symbols all functions here should be static
  * and be included via #include "extension_utils.c" instead of the regular linking process
  */
 
@@ -24,9 +24,10 @@
 
 #define EXTENSION_PROXY_TABLE "cache_inval_extension"
 #define CACHE_SCHEMA_NAME "_timescaledb_cache"
-#define MAX_SO_NAME_LEN NAMEDATALEN+NAMEDATALEN+1+1 /* extname+"-"+version */
 
 #define RENDEZVOUS_LOADER_PRESENT_NAME "timescaledb.loader_present"
+
+
 
 enum ExtensionState
 {
@@ -71,7 +72,11 @@ extension_version(void)
 	ScanKeyData entry[1];
 	bool		is_null = true;
 	static char *sql_version = NULL;
-
+	/*
+	 * This function assumes that you are within a transaction context. 
+	 * It will fail to run if we are outside of a txn context, as it will not know
+	 * which tuples in the catalog are valid.
+	 */
 	rel = heap_open(ExtensionRelationId, AccessShareLock);
 
 	ScanKeyInit(&entry[0],
@@ -229,3 +234,4 @@ extension_load_without_preload()
 		return;
 	}
 }
+
