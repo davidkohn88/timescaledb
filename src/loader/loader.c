@@ -11,27 +11,8 @@
 #include <utils/inval.h>
 #include <nodes/print.h>
 
-/* BGW includes below */
-/* These are always necessary for a bgworker */
-#include <postmaster/bgworker.h>
-#include <storage/ipc.h>
-#include <storage/latch.h>
-#include <storage/lwlock.h>
-#include <storage/proc.h>
-#include <storage/shmem.h>             
-
-/* needed for getting database list*/
-#include <catalog/pg_database.h>
-#include <access/heapam.h>
-#include <access/htup_details.h>
-#include <utils/snapmgr.h>
-
-/* needed for initializing shared memory and using various locks */
-#include <utils/hsearch.h>
-#include <storage/spin.h>
-
-#include "../timescale_bgw_utils.c" /* includes extension utils as well*/
-//#include "timescale_bgw_launcher.h" /* must have one header file for the functions called on bgw startup*/
+#include "../extension_utils.c"
+#include "../timescale_bgw_utils.c" 
 
 
 #define PG96 ((PG_VERSION_NUM >= 90600) && (PG_VERSION_NUM < 100000))
@@ -409,13 +390,10 @@ call_extension_post_parse_analyze_hook(ParseState *pstate,
  *  2) Start a cluster launcher that gets the dbs in the cluster, and starts a worker for each
  *   of them. 
  * 
- * 
- * 
- * 
- * 
 */
 
 
+#define TSBGW_LAUNCHER_RESTART_TIME 60
 
 
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -428,8 +406,9 @@ static void register_timescale_bgw_cluster_launcher(void) {
     ereport(LOG, (errmsg("Registering Timescale BGW Launcher")));
 
     /*set up worker settings for our main worker */
+	snprintf(worker.bgw_name, BGW_MAXLEN, "Timescale BGW Cluster Launcher");
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    worker.bgw_restart_time = TSBGW_LAUNCHER_RESTART_TIME;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     worker.bgw_notify_pid = 0;
     /* TODO: maybe pass in the library name, we know it, one assumes, as we are in 
@@ -438,7 +417,7 @@ static void register_timescale_bgw_cluster_launcher(void) {
     break this otherwise?*/
     sprintf(worker.bgw_library_name, "timescaledb");
     sprintf(worker.bgw_function_name , "timescale_bgw_cluster_launcher_main");
-    snprintf(worker.bgw_name, BGW_MAXLEN, "timescale_bgw_launcher");
+    
 
     RegisterBackgroundWorker(&worker);
     
@@ -453,72 +432,18 @@ static Size tsbgw_memsize(void){
 }
 
 
-
 /* this gets called when shared memory is initialized in a backend (shmem_startup_hook)
  * based on pg_stat_statements.c*/
 static void timescale_bgw_shmem_startup(void){
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
 
+	ereport(LOG,(errmsg("In SHMEM STARTUP HOOK")));
     /* possible_restart = true in case this is a restart within the postmaster*/
     get_tsbgw_shared_state(true);
 }
 
-/* 
- * Model this on autovacuum.c -> get_database_list
- * Note that we are not doing all the things around memory context that they do, because 
- * a) we're using shared memory to store the list of dbs and b) we're in a function and 
- * shorter lived context here. 
- */
-static void populate_database_htab(void){
-    Relation        rel;
-    HeapScanDesc    scan;
-    HeapTuple       tup;
-    
-    
-    /* by this time we should already be connected to the db, and only have access to shared catalogs*/
-    /*start a txn, see note in autovacuum.c for why*/
-    StartTransactionCommand();
-    (void) GetTransactionSnapshot();
 
-    rel = heap_open(DatabaseRelationId, AccessShareLock);
-    scan = heap_beginscan_catalog(rel, 0, NULL);
-
-    while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
-    {
-        Form_pg_database    pgdb = (Form_pg_database) GETSTRUCT(tup);
-        tsbgw_shared_state  *tsbgw_ss=get_tsbgw_shared_state(false);
-        tsbgw_hash_entry    *tsbgw_he;
-        Oid                 db_oid;
-        bool                hash_found;
-        
-
-        if (!pgdb->datallowconn) 
-            continue; /* don't bother with dbs that don't allow connections, we'll fail when starting a worker anyway*/
-        
-        db_oid = HeapTupleGetOid(tup);
-        if (hash_get_num_entries(tsbgw_ss->hashtable) >= TSBGW_MAX_DBS)
-            ereport(FATAL, (errmsg("More databases in cluster than allocated in shared memory, stopping cluster launcher")));
-            
-        /*acquire lock so we can access hash table*/
-        LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
-
-        tsbgw_he = (tsbgw_hash_entry *) hash_search(tsbgw_ss->hashtable, &db_oid, HASH_ENTER, &hash_found);
-        if (!hash_found)
-            tsbgw_he->ts_installed = FALSE;
-            snprintf(tsbgw_he->ts_version, MAX_VERSION_LEN, "");
-            tsbgw_he->db_launcher_pid = 0;
-            tsbgw_he->num_active_workers = 0; 
-
-        LWLockRelease(tsbgw_ss->lock);
-    }
-
-    heap_endscan(scan);
-    heap_close(rel, AccessShareLock);
-    CommitTransactionCommand();
-
-
-}
 /* this gets called by the loader (and therefore the postmaster) at shared_preload_libraries time*/
 static void timescale_bgw_shmem_init(void){
     RequestAddinShmemSpace(tsbgw_memsize());
@@ -526,44 +451,47 @@ static void timescale_bgw_shmem_init(void){
     prev_shmem_startup_hook = shmem_startup_hook;
     shmem_startup_hook = timescale_bgw_shmem_startup;
 }
+
+
 void timescale_bgw_cluster_launcher_main(void) {
     
-    BackgroundWorker        worker;
+    
     HASH_SEQ_STATUS         hash_seq;
     tsbgw_hash_entry        *current_entry;
     tsbgw_shared_state      *tsbgw_ss = get_tsbgw_shared_state(false);
-
+	
 
     BackgroundWorkerUnblockSignals();
     increment_total_workers();  
     
     /* Connect to the db, no db name yet, so can only access shared catalogs*/
     BackgroundWorkerInitializeConnection(NULL, NULL);
-    populate_database_htab();
-
-    /*common parameters for all our scheduler workers*/
-    memset(&worker, 0, sizeof(worker));
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_restart_time = BGW_NEVER_RESTART;
-    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    sprintf(worker.bgw_library_name, "timescaledb");
-    sprintf(worker.bgw_function_name , "timescale_bgw_db_scheduler_entrypoint");
-    worker.bgw_notify_pid = MyProcPid;
-    
+	LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
+	populate_database_htab();
+	LWLockRelease(tsbgw_ss->lock);
     /*now scan our hash table of dbs and register a worker for each*/
     LWLockAcquire(tsbgw_ss->lock, AccessShareLock);
     hash_seq_init(&hash_seq, tsbgw_ss->hashtable);
     
     while ((current_entry = hash_seq_search(&hash_seq)) != NULL) 
     {
-        BackgroundWorkerHandle  *handle;
-        BgwHandleStatus         status;
-        pid_t                   worker_pid;
+		BackgroundWorkerHandle 				*worker_handle = NULL;
+		bool								worker_registered = false;
+		pid_t								worker_pid;
+		VirtualTransactionId				vxid;
+		
+		SetInvalidVirtualTransactionId(vxid);
 
-        worker.bgw_main_arg = current_entry->db_oid;
-        RegisterDynamicBackgroundWorker(&worker, &handle);
-        status = WaitForBackgroundWorkerStartup(handle, &worker_pid);
-        ereport(LOG, (errmsg("Worker started with PID %d", worker_pid)));
+		worker_registered = register_tsbgw_entrypoint_for_db(current_entry->db_oid, vxid, &worker_handle);
+
+		if (worker_registered){
+			WaitForBackgroundWorkerStartup(worker_handle, &worker_pid);
+			ereport(LOG, (errmsg("Worker started with PID %d", worker_pid )));
+		} 
+		else 
+			break; /* should we complain?*/
+			
+
     }
     LWLockRelease(tsbgw_ss->lock);
     decrement_total_workers();
@@ -572,62 +500,112 @@ void timescale_bgw_cluster_launcher_main(void) {
     
 }
 
+
+/*
+ * This can be run either from the cluster launcher at db_startup time, or in the case of an install/uninstall/update of the extension, 
+ * in the first case, we have no vxid that we're waiting on. In the second case, we do, because we have to wait to see whether the txn that did the alter extension succeeded. So we wait for it to finish, then we a)
+ * check to see whether the version of Timescale shown as installed in the catalogs is different from the version we populated in 
+ * our shared hash table, then if it is b) tell the old version's db_scheduler to shut down, ideally gracefully and it will cascade any 
+ * shutdown events to any workers it has started then c) start a new db_scheduler worker using the updated .so  . 
+ * This worker will have a restart time specced in case there's a crash during the process, but will exit 0 when it has finished its job, so won't be restarted. 
+ * 
+ */
 void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
-    tsbgw_hash_entry        *hash_entry;
-    bool                    entry_found;
-	bool					ts_installed = false;
-	char					version[MAX_VERSION_LEN];
-    tsbgw_shared_state      *tsbgw_ss = get_tsbgw_shared_state(false);
+	bool						ts_installed = false;
+	char						version[MAX_VERSION_LEN];
+    tsbgw_shared_state      	*tsbgw_ss = get_tsbgw_shared_state(false);
+	tsbgw_hash_entry		    *tsbgw_he;
+	bool						hash_found = false;
+	BackgroundWorkerHandle  	*old_scheduler_handle = NULL;
+	bool						ts_previously_installed = false;
+	bool						ts_version_change = true; /* true also at server startup when there is no old version populated yet*/
+	VirtualTransactionId		vxid;
 
-
+	/* unblock signals and use default signal handlers*/
     BackgroundWorkerUnblockSignals();
     ereport(LOG, (errmsg("Worker started for Database id = %d with pid %d", db_id, MyProcPid))); 
     increment_total_workers();
     BackgroundWorkerInitializeConnectionByOid(db_id, InvalidOid);
-    ereport(LOG, (errmsg("Connected to Database id = %d", db_id)));
-    ereport(LOG, (errmsg("Total Workers = %d", get_total_workers())));
-    
-    /*db scheduler can access shared memory and update pid with only a shared lock as there's only one worker per db*/
-    LWLockAcquire(tsbgw_ss->lock, AccessShareLock);
-    hash_entry = hash_search(tsbgw_ss->hashtable, &db_id, HASH_ENTER, &entry_found);
-    if (entry_found)
+	ereport(LOG, (errmsg("Connected to db %d", db_id)));
+	/*Wait until whatever vxid that potentially called us finishes before we get a transaction so we can see the correct state after its effects */
+	memcpy(&vxid, MyBgworkerEntry->bgw_extra, sizeof(VirtualTransactionId));
+	if (VirtualTransactionIdIsValid(vxid))
+		VirtualXactLock(vxid, true);
+
+
+	/* 
+     * now look up our hash_entry, make sure we take an exclusive lock on the table even though we're just getting our entry, 
+     * because we might need to populate the hash table if it doesn't exist. When we're updating it later, we can use a shared 
+     * lock as we're the only folks accessing. 
+     */
+    LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
+    tsbgw_he = hash_search(tsbgw_ss->hashtable, &db_id, HASH_FIND, &hash_found);
+    if (!hash_found)
     {
-        StartTransactionCommand();
-        (void) GetTransactionSnapshot();
-		/*move to local copy so we can use without lock on hashtable later */
-		ts_installed = extension_exists();
-        hash_entry->ts_installed = ts_installed;
-        if (ts_installed)
-            StrNCpy(version, extension_version(), MAX_VERSION_LEN);
-			StrNCpy(hash_entry->ts_version, version, MAX_VERSION_LEN);
-        CommitTransactionCommand();
-        ereport(LOG, (errmsg("TimescaleDB %s Installed In DB ID %d", (ts_installed) ? hash_entry->ts_version:"not", db_id)));
-		
+        populate_database_htab();
+        tsbgw_he = hash_search(tsbgw_ss->hashtable, &db_id, HASH_FIND, &hash_found);
+        if (!hash_found)
+            ereport(LOG, (errmsg("Database with db_id = %d not found in the hashtable. This should be impossible as we are currently connected to said database. Exiting.",db_id)));
+            proc_exit(0);
     }
-    LWLockRelease(tsbgw_ss->lock);
-	if (ts_installed) /*gonna need to add a check around the extension version as well so that we make sure we're good. */
+	else
+	{
+		old_scheduler_handle = tsbgw_he->db_scheduler_handle;
+		ts_previously_installed = tsbgw_he->ts_installed;
+		ts_version_change = !strcmp(version, tsbgw_he->ts_version);
+	}
+	LWLockRelease(tsbgw_ss->lock);
+	/* now we can start our transaction and get the version currently installed*/
+	StartTransactionCommand();
+	(void) GetTransactionSnapshot();
+	
+	ts_installed = extension_exists();
+	if (ts_installed)
+		StrNCpy(version, extension_version(), MAX_VERSION_LEN);
+	CommitTransactionCommand();
+	ereport(LOG, (errmsg("TimescaleDB %s Installed In DB ID %d", (ts_installed) ? version:"not", db_id)));
+
+	if (ts_version_change && ts_previously_installed)
+	{
+		/* we need to shut down the old db scheduler if it exists because we are either uninstalling or updating*/
+		if (old_scheduler_handle != NULL)
+		{
+			TerminateBackgroundWorker(old_scheduler_handle);
+			WaitForBackgroundWorkerShutdown(old_scheduler_handle); /*should I check that the status is stopped?*/
+		}
+	}
+	if (ts_installed && ts_version_change) /*gonna need to add a check around the extension version as well so that we make sure we're good. */
 	{
 		BackgroundWorker		worker;
 		char					soname[MAX_SO_NAME_LEN];
-		BackgroundWorkerHandle  *handle;
         BgwHandleStatus         status;
         pid_t                   worker_pid;
 		
 		snprintf(soname, MAX_SO_NAME_LEN, "%s-%s", EXTENSION_NAME, version);	
 		    /*common parameters for all our scheduler workers*/
 		memset(&worker, 0, sizeof(worker));
+		snprintf(worker.bgw_name, BGW_MAXLEN, "Timescale BGW Scheduler for DB %d ", db_id);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 		worker.bgw_restart_time = TSBGW_DB_SCHEDULER_RESTART_TIME;
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		StrNCpy(worker.bgw_library_name,soname, MAX_SO_NAME_LEN);
+		StrNCpy(worker.bgw_library_name, soname, MAX_SO_NAME_LEN);
 		sprintf(worker.bgw_function_name , "timescale_bgw_db_scheduler_main");
 		worker.bgw_main_arg = db_id;
-		worker.bgw_notify_pid = MyProcPid;	
-		RegisterDynamicBackgroundWorker(&worker, &handle);
-        status = WaitForBackgroundWorkerStartup(handle, &worker_pid);
-        ereport(LOG, (errmsg("Versioned worker started with PID %d", worker_pid)));	
+		worker.bgw_notify_pid = MyProcPid;
+
+		/*this might be better to do with a mutex on the entry itself and a shared lock on the hashtable, but seems like overkill for now */
+		LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE); /*get the hashtable lock so we can update our handle.*/
+		if (RegisterDynamicBackgroundWorker(&worker, &(tsbgw_he->db_scheduler_handle)))
+		{	
+			status = WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
+			strcpy(tsbgw_he->ts_version, version);
+			ereport(LOG, (errmsg("Versioned worker started with PID %d", worker_pid)));	
+		}
+		LWLockRelease(tsbgw_ss->lock);
+        
 	}
     
 	decrement_total_workers();
+	proc_exit(0);
 
 }
