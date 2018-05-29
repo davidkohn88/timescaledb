@@ -395,9 +395,19 @@ call_extension_post_parse_analyze_hook(ParseState *pstate,
 
 #define TSBGW_LAUNCHER_RESTART_TIME 60
 
-
+static volatile sig_atomic_t got_sigterm = false;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
+static void
+timescale_bgw_sigterm(SIGNAL_ARGS)
+{
+	int			save_errno = errno;
+
+	got_sigterm = true;
+	SetLatch(MyLatch);
+
+	errno = save_errno;
+}
 
 
 static void register_timescale_bgw_cluster_launcher(void) {
@@ -460,7 +470,7 @@ void timescale_bgw_cluster_launcher_main(void) {
     tsbgw_hash_entry        *current_entry;
     tsbgw_shared_state      *tsbgw_ss = get_tsbgw_shared_state(false);
 	
-
+	pqsignal(SIGTERM, timescale_bgw_sigterm);
     BackgroundWorkerUnblockSignals();
     increment_total_workers();  
     
@@ -494,10 +504,17 @@ void timescale_bgw_cluster_launcher_main(void) {
 
     }
     LWLockRelease(tsbgw_ss->lock);
-    decrement_total_workers();
-    ereport(LOG, (errmsg("Cluster Launcher shutting down")));
 
-    
+	while (!got_sigterm)
+	{
+		int wl_rc;
+
+        wl_rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, TSBGW_LAUNCHER_RESTART_TIME * 1000L, PG_WAIT_EXTENSION );
+        ResetLatch(MyLatch);
+        if (wl_rc & WL_POSTMASTER_DEATH)
+            proc_exit(1);
+	}
+    proc_exit(1);
 }
 
 
@@ -535,18 +552,13 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
 
 	/* 
      * now look up our hash_entry, make sure we take an exclusive lock on the table even though we're just getting our entry, 
-     * because we might need to populate the hash table if it doesn't exist. When we're updating it later, we can use a shared 
-     * lock as we're the only folks accessing. 
+     * because there might be a worker for the db already using said entry, if we are being started during update of extension.
      */
     LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
     tsbgw_he = hash_search(tsbgw_ss->hashtable, &db_id, HASH_FIND, &hash_found);
     if (!hash_found)
     {
-        populate_database_htab();
-        tsbgw_he = hash_search(tsbgw_ss->hashtable, &db_id, HASH_FIND, &hash_found);
-        if (!hash_found)
-            ereport(LOG, (errmsg("Database with db_id = %d not found in the hashtable. This should be impossible as we are currently connected to said database. Exiting.",db_id)));
-            proc_exit(0);
+	    ereport(ERROR, (errmsg("Database with db_id = %d not found in the hashtable. This should be impossible as we are currently connected to said database. Exiting.",db_id)));
     }
 	else
 	{
@@ -586,7 +598,7 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
 		memset(&worker, 0, sizeof(worker));
 		snprintf(worker.bgw_name, BGW_MAXLEN, "Timescale BGW Scheduler for DB %d ", db_id);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-		worker.bgw_restart_time = TSBGW_DB_SCHEDULER_RESTART_TIME;
+		worker.bgw_restart_time = BGW_NEVER_RESTART; /*Only the launcher should be restarted, it will restart the db workers/us*/
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 		StrNCpy(worker.bgw_library_name, soname, MAX_SO_NAME_LEN);
 		sprintf(worker.bgw_function_name , "timescale_bgw_db_scheduler_main");
