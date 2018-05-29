@@ -29,6 +29,8 @@
 #include <utils/hsearch.h>
 #include <storage/spin.h>
 
+/* for setting our wait event during waitlatch*/
+#include <pgstat.h>
 #include "extension.h"
 
 #define TSBGW_INIT_DBS 8
@@ -50,8 +52,8 @@ typedef struct tsbgw_hash_entry {
     Oid                         db_oid; /* key for the hash table, must be first */
     bool                        ts_installed;
     char                        ts_version[MAX_VERSION_LEN];
-    BackgroundWorkerHandle      *db_scheduler_handle;
-    int                         num_active_jobs;
+    BackgroundWorkerHandle      *db_scheduler_handle; /* needed to shut down properly */
+    int                         num_active_jobs; /* this is for the number of workers started for active jobs, not scheduler workers */
 } tsbgw_hash_entry;
 
 static tsbgw_shared_state* get_tsbgw_shared_state(bool possible_restart){
@@ -148,7 +150,7 @@ static bool register_tsbgw_entrypoint_for_db(Oid db_id, VirtualTransactionId vxi
     memset(&worker, 0, sizeof(worker));
     snprintf(worker.bgw_name, BGW_MAXLEN, "Timescale BGW Entrypoint DB %d", db_id);
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_restart_time = TSBGW_DB_SCHEDULER_RESTART_TIME; /*the worker will exit 0 when finished, this ensures that if another proc crashes while we are running, we get restarted*/
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     sprintf(worker.bgw_library_name, "timescaledb");
     sprintf(worker.bgw_function_name , "timescale_bgw_db_scheduler_entrypoint");
