@@ -8,6 +8,9 @@
 
 #include "timescale_bgw_utils.c"
 
+/* for setting our wait event during waitlatch*/
+#include <pgstat.h>
+#include "extension.h"
 
 
 #include "timescale_bgw.h"
@@ -88,6 +91,7 @@ extern void timescale_bgw_db_scheduler_main(Oid db_id){
         ereport(LOG, (errmsg("Total Workers = %d", get_total_workers())));
     }
     ereport(LOG, (errmsg("Exiting db %d", db_id)));
+    decrement_total_workers();
     proc_exit(1);
  
 };
