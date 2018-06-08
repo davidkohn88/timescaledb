@@ -24,6 +24,7 @@
 /* for setting our wait event during waitlatch*/
 #include <pgstat.h>
 
+#include <postmaster/bgworker_internals.h>
 #include "../timescale_bgw_utils.c" 
 
 
@@ -79,7 +80,10 @@ static void timescale_bgw_shmem_init(void);
 static void register_timescale_bgw_cluster_launcher(void);
 /*these are not defined as static as they need to be accessible for bgworker startup*/
 void timescale_bgw_cluster_launcher_main(void); 
+
+PG_FUNCTION_INFO_V1(timescale_bgw_db_scheduler_pre_version_change);
 void timescale_bgw_db_scheduler_entrypoint(Oid db_id);
+
 
 
 static void
@@ -537,7 +541,7 @@ static bool register_tsbgw_entrypoint_for_db(Oid db_id, VirtualTransactionId vxi
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     worker.bgw_restart_time = BGW_NEVER_RESTART;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    sprintf(worker.bgw_library_name, "timescaledb");
+    sprintf(worker.bgw_library_name, EXTENSION_NAME);
     sprintf(worker.bgw_function_name , "timescale_bgw_db_scheduler_entrypoint");
     worker.bgw_notify_pid = MyProcPid;
     worker.bgw_main_arg = db_id;
@@ -600,8 +604,59 @@ void timescale_bgw_cluster_launcher_main(void) {
 	/* TODO: kill child procs? */
     proc_exit(1);
 }
+struct BackgroundWorkerHandle
+{
+	int			slot;
+	uint64		generation;
+};
+/* kills old background workers for updates
+ * Called from a SQL interface inside of a transaction. We're already connected to a db and are either installing or updating the extension. 
+ */
+Datum timescale_bgw_db_scheduler_pre_version_change(PG_FUNCTION_ARGS){
+	tsbgw_shared_state      	*tsbgw_ss = get_tsbgw_shared_state(false);
+	tsbgw_hash_entry		    *tsbgw_he;
+	bool						hash_found;	
+	BackgroundWorkerHandle  	*old_scheduler_handle = NULL;
+	BackgroundWorkerHandle		*new_scheduler_handle = NULL;	
+	VirtualTransactionId		vxid;
+	bool						worker_started;
 
+	GET_VXID_FROM_PGPROC(vxid, *MyProc);
+	worker_started = register_tsbgw_entrypoint_for_db(MyDatabaseId, vxid, &new_scheduler_handle);
 
+	LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
+    tsbgw_he = hash_search(tsbgw_ss->hashtable, &MyDatabaseId, HASH_FIND, &hash_found);
+
+    if (!hash_found)
+    {
+	    ereport(ERROR, (errmsg("Database with db_id = %d not found in the hashtable. This should be impossible as we are currently connected to said database. Exiting.", MyDatabaseId)));
+    }
+	else
+	{
+		ereport(LOG,(errmsg("The pointer to db_scheduler is: %p Struct: %d , %lu ", tsbgw_he->db_scheduler_handle, tsbgw_he->db_scheduler_handle->slot,tsbgw_he->db_scheduler_handle->generation)));
+
+		old_scheduler_handle = tsbgw_he->db_scheduler_handle;
+	}
+	LWLockRelease(tsbgw_ss->lock);
+	if (old_scheduler_handle != NULL)
+	{
+		ereport(LOG,(errmsg("The pointer to old_scheduler is: %p Struct: %d , %lu ", old_scheduler_handle, old_scheduler_handle->slot,old_scheduler_handle->generation)));
+
+		TerminateBackgroundWorker(old_scheduler_handle);
+		WaitForBackgroundWorkerShutdown(old_scheduler_handle);
+	}
+	
+	if (worker_started)
+	{
+		/*Should we wait for startup? */
+		PG_RETURN_BOOL(true);
+	}
+	else
+	{
+		ereport(LOG,(errmsg("Unable to start entrypoint worker for DB %d during upgrade", MyProcPid)));
+	}
+	PG_RETURN_BOOL(false);
+}	
 /*
  * This can be run either from the cluster launcher at db_startup time, or in the case of an install/uninstall/update of the extension, 
  * in the first case, we have no vxid that we're waiting on. In the second case, we do, because we have to wait to see whether the txn that did the alter extension succeeded. So we wait for it to finish, then we a)
@@ -610,16 +665,18 @@ void timescale_bgw_cluster_launcher_main(void) {
  * shutdown events to any workers it has started then c) start a new db_scheduler worker using the updated .so  . 
  *  
  * TODO: Make sure no race conditions if this is called multiple times when, say, upgrading or through the sql interface. 
+ * TODO: Avoid race condition with wrong-versioned workers by having install/uninstall/update shut down old workers, that means this function will only be responsible for waiting until
+ * the vxid where the modification is happening either commits or aborts and then restarting the db_scheduler worker.
+ * TODO: If our db isn't in the hash table then we should probably add it. 
  */
+
+
 void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
 	bool						ts_installed = false;
 	char						version[MAX_VERSION_LEN];
     tsbgw_shared_state      	*tsbgw_ss = get_tsbgw_shared_state(false);
 	tsbgw_hash_entry		    *tsbgw_he;
 	bool						hash_found = false;
-	BackgroundWorkerHandle  	*old_scheduler_handle = NULL;
-	bool						ts_previously_installed = false;
-	bool						ts_version_change = true; /* true also at server startup when there is no old version populated yet*/
 	VirtualTransactionId		vxid;
 
 	
@@ -640,38 +697,27 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
      * because there might be a worker for the db already using said entry, if we are being started during update of extension.
      */
     LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
-    tsbgw_he = hash_search(tsbgw_ss->hashtable, &db_id, HASH_FIND, &hash_found);
+    tsbgw_he = hash_search(tsbgw_ss->hashtable, &db_id, HASH_ENTER, &hash_found);
     if (!hash_found)
     {
-	    ereport(ERROR, (errmsg("Database with db_id = %d not found in the hashtable. This should be impossible as we are currently connected to said database. Exiting.",db_id)));
+		tsbgw_he->ts_installed = FALSE;
+		snprintf(tsbgw_he->ts_version, MAX_VERSION_LEN, "");
+		tsbgw_he->db_scheduler_handle = NULL;
+		tsbgw_he->num_active_jobs = 0; 
     }
 	else
 	{
-		old_scheduler_handle = tsbgw_he->db_scheduler_handle;
-		ts_previously_installed = tsbgw_he->ts_installed;
-		ts_version_change = !strcmp(version, tsbgw_he->ts_version);
+		pid_t 			bgw_pid;
+		if (tsbgw_he->db_scheduler_handle != NULL && GetBackgroundWorkerPid(tsbgw_he->db_scheduler_handle, &bgw_pid) != BGWH_STOPPED)
+			ereport(FATAL,(errmsg("Another worker is active for database ID %d. Cannot start another. ", db_id)));
 	}
 	/* now we can start our transaction and get the version currently installed*/
 	StartTransactionCommand();
 	(void) GetTransactionSnapshot();
 	
 	ts_installed = extension_exists();
+
 	if (ts_installed)
-		StrNCpy(version, extension_version(), MAX_VERSION_LEN);
-	CommitTransactionCommand();
-	ereport(LOG, (errmsg("TimescaleDB %s Installed In DB ID %d", (ts_installed) ? version:"not", db_id)));
-
-	if (ts_version_change && ts_previously_installed)
-	{
-		/* we need to shut down the old db scheduler if it exists because we are either uninstalling or updating*/
-		if (old_scheduler_handle != NULL)
-		{
-			TerminateBackgroundWorker(old_scheduler_handle);
-			WaitForBackgroundWorkerShutdown(old_scheduler_handle); /*should I check that the status is stopped?*/
-		}
-	}
-
-	if (ts_installed && ts_version_change) /*gonna need to add a check around the extension version as well so that we make sure we're good. */
 	{
 		BackgroundWorker		worker;
 		char					soname[MAX_SO_NAME_LEN];
@@ -679,7 +725,7 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
         pid_t                   worker_pid;
 			
 		
-
+		StrNCpy(version, extension_version(), MAX_VERSION_LEN);
 		snprintf(soname, MAX_SO_NAME_LEN, "%s-%s", EXTENSION_NAME, version);	
 		    /*common parameters for all our scheduler workers*/
 		memset(&worker, 0, sizeof(worker));
@@ -698,8 +744,10 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
 		{
 			ereport(LOG, (errmsg("Version %s does not have a background worker, exiting.", soname)));
 		}
-		else if (RegisterDynamicBackgroundWorker(&worker, &(tsbgw_he->db_scheduler_handle)))
+		else if (RegisterDynamicBackgroundWorker(&worker, &tsbgw_he->db_scheduler_handle))
 		{	
+
+			ereport(LOG,(errmsg("The pointer to db_scheduler is: %p Struct: %d , %lu ", tsbgw_he->db_scheduler_handle, tsbgw_he->db_scheduler_handle->slot,tsbgw_he->db_scheduler_handle->generation)));
 			status = WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
 			strcpy(tsbgw_he->ts_version, version);
 			ereport(LOG, (errmsg("Versioned worker started with PID %d", worker_pid)));	

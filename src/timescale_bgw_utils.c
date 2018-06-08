@@ -27,7 +27,6 @@
 
 /* for setting our wait event during waitlatch*/
 #include <pgstat.h>
-
 #include "extension.h"
 
 #define TSBGW_INIT_DBS 8
