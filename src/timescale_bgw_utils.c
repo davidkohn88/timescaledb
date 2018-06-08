@@ -45,13 +45,27 @@ typedef struct tsbgw_shared_state {
     int         total_workers;
 } tsbgw_shared_state;
 
+
+/* 
+ * Not horribly happy about this, but we should do it for now. We're copying the struct from bgworker.c over here so that we can correctly allocate its size and 
+ * pass it between procs in shared memory. Otherwise we can only access it with a pointer and that doesn't work between procs. It is meant to be opaque to the 
+ * reader because it could change implementation, so we may at some point have to do some #define magic with pg versions in order to make it work.
+ */
+struct BackgroundWorkerHandle
+{
+	int			slot;
+	uint64		generation;
+};
+
 typedef struct tsbgw_hash_entry {
     Oid                         db_oid; /* key for the hash table, must be first */
     bool                        ts_installed;
     char                        ts_version[MAX_VERSION_LEN];
-    BackgroundWorkerHandle      *db_scheduler_handle; /* needed to shut down properly */
+    bool                        valid_db_scheduler_handle; /*because zero is a valid value for db_scheduler_handles things, we should have a bool saying whether we've actually populated this field*/
+    BackgroundWorkerHandle      db_scheduler_handle; /* needed to shut down properly */
     int                         num_active_jobs; /* this is for the number of workers started for active jobs, not scheduler workers */
 } tsbgw_hash_entry;
+
 
 static tsbgw_shared_state* get_tsbgw_shared_state(bool possible_restart){
 	static tsbgw_shared_state *tsbgw_ss = NULL;

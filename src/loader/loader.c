@@ -408,7 +408,7 @@ call_extension_post_parse_analyze_hook(ParseState *pstate,
 */
 
 
-#define TSBGW_LAUNCHER_RESTART_TIME 60
+#define TSBGW_LAUNCHER_RESTART_TIME 5
 
 static volatile sig_atomic_t got_sigterm = false;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -516,7 +516,8 @@ static void populate_database_htab(void){
         if (!hash_found)
             tsbgw_he->ts_installed = FALSE;
             snprintf(tsbgw_he->ts_version, MAX_VERSION_LEN, "");
-            tsbgw_he->db_scheduler_handle = NULL;
+			tsbgw_he->valid_db_scheduler_handle = false;
+            memset(&tsbgw_he->db_scheduler_handle, 0, sizeof(BackgroundWorkerHandle)) ;
             tsbgw_he->num_active_jobs = 0; 
 
        
@@ -548,6 +549,7 @@ static bool register_tsbgw_entrypoint_for_db(Oid db_id, VirtualTransactionId vxi
     memcpy(worker.bgw_extra, &vxid, sizeof(VirtualTransactionId));
     
     return RegisterDynamicBackgroundWorker(&worker, handle);
+
 }
 
 
@@ -604,12 +606,9 @@ void timescale_bgw_cluster_launcher_main(void) {
 	/* TODO: kill child procs? */
     proc_exit(1);
 }
-struct BackgroundWorkerHandle
-{
-	int			slot;
-	uint64		generation;
-};
-/* kills old background workers for updates
+/* 
+ * kills old background workers for updates, and starts the entrypoint worker, passing in our current virtual transaction id so that we wait to 
+ * start the new scheduler until after the txn that may have changed the extension has either committed or aborted. 
  * Called from a SQL interface inside of a transaction. We're already connected to a db and are either installing or updating the extension. 
  */
 Datum timescale_bgw_db_scheduler_pre_version_change(PG_FUNCTION_ARGS){
@@ -617,43 +616,34 @@ Datum timescale_bgw_db_scheduler_pre_version_change(PG_FUNCTION_ARGS){
 	tsbgw_hash_entry		    *tsbgw_he;
 	bool						hash_found;	
 	BackgroundWorkerHandle  	*old_scheduler_handle = NULL;
-	BackgroundWorkerHandle		*new_scheduler_handle = NULL;	
+	BackgroundWorkerHandle		*new_entrypoint_handle = NULL;	
 	VirtualTransactionId		vxid;
-	bool						worker_started;
 
 	GET_VXID_FROM_PGPROC(vxid, *MyProc);
-	worker_started = register_tsbgw_entrypoint_for_db(MyDatabaseId, vxid, &new_scheduler_handle);
 
 	LWLockAcquire(tsbgw_ss->lock, LW_EXCLUSIVE);
     tsbgw_he = hash_search(tsbgw_ss->hashtable, &MyDatabaseId, HASH_FIND, &hash_found);
 
-    if (!hash_found)
-    {
-	    ereport(ERROR, (errmsg("Database with db_id = %d not found in the hashtable. This should be impossible as we are currently connected to said database. Exiting.", MyDatabaseId)));
-    }
-	else
+    if (hash_found && tsbgw_he->valid_db_scheduler_handle)
 	{
-		ereport(LOG,(errmsg("The pointer to db_scheduler is: %p Struct: %d , %lu ", tsbgw_he->db_scheduler_handle, tsbgw_he->db_scheduler_handle->slot,tsbgw_he->db_scheduler_handle->generation)));
-
-		old_scheduler_handle = tsbgw_he->db_scheduler_handle;
+		old_scheduler_handle = &tsbgw_he->db_scheduler_handle;
 	}
 	LWLockRelease(tsbgw_ss->lock);
 	if (old_scheduler_handle != NULL)
 	{
-		ereport(LOG,(errmsg("The pointer to old_scheduler is: %p Struct: %d , %lu ", old_scheduler_handle, old_scheduler_handle->slot,old_scheduler_handle->generation)));
-
 		TerminateBackgroundWorker(old_scheduler_handle);
+		ereport(LOG, (errmsg("Waiting for shutdown")));
 		WaitForBackgroundWorkerShutdown(old_scheduler_handle);
 	}
-	
-	if (worker_started)
+	ereport(LOG, (errmsg("About to start up")));
+	if (register_tsbgw_entrypoint_for_db(MyDatabaseId, vxid, &new_entrypoint_handle))
 	{
 		/*Should we wait for startup? */
 		PG_RETURN_BOOL(true);
 	}
 	else
 	{
-		ereport(LOG,(errmsg("Unable to start entrypoint worker for DB %d during upgrade", MyProcPid)));
+		ereport(LOG,(errmsg("Unable to start entrypoint worker for DB %d", MyProcPid))); /* Maybe should be a warning? Probably not an error though*/
 	}
 	PG_RETURN_BOOL(false);
 }	
@@ -702,13 +692,14 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
     {
 		tsbgw_he->ts_installed = FALSE;
 		snprintf(tsbgw_he->ts_version, MAX_VERSION_LEN, "");
-		tsbgw_he->db_scheduler_handle = NULL;
+		tsbgw_he->valid_db_scheduler_handle = false;
+		memset(&tsbgw_he->db_scheduler_handle, 0, sizeof(BackgroundWorkerHandle));
 		tsbgw_he->num_active_jobs = 0; 
     }
 	else
 	{
 		pid_t 			bgw_pid;
-		if (tsbgw_he->db_scheduler_handle != NULL && GetBackgroundWorkerPid(tsbgw_he->db_scheduler_handle, &bgw_pid) != BGWH_STOPPED)
+		if (tsbgw_he->valid_db_scheduler_handle && GetBackgroundWorkerPid(&tsbgw_he->db_scheduler_handle, &bgw_pid) != BGWH_STOPPED)
 			ereport(FATAL,(errmsg("Another worker is active for database ID %d. Cannot start another. ", db_id)));
 	}
 	/* now we can start our transaction and get the version currently installed*/
@@ -723,6 +714,7 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
 		char					soname[MAX_SO_NAME_LEN];
         BgwHandleStatus         status;
         pid_t                   worker_pid;
+		BackgroundWorkerHandle	*bgw_handle;
 			
 		
 		StrNCpy(version, extension_version(), MAX_VERSION_LEN);
@@ -744,11 +736,12 @@ void timescale_bgw_db_scheduler_entrypoint(Oid db_id){
 		{
 			ereport(LOG, (errmsg("Version %s does not have a background worker, exiting.", soname)));
 		}
-		else if (RegisterDynamicBackgroundWorker(&worker, &tsbgw_he->db_scheduler_handle))
+		else if (RegisterDynamicBackgroundWorker(&worker, &bgw_handle))
 		{	
-
-			ereport(LOG,(errmsg("The pointer to db_scheduler is: %p Struct: %d , %lu ", tsbgw_he->db_scheduler_handle, tsbgw_he->db_scheduler_handle->slot,tsbgw_he->db_scheduler_handle->generation)));
-			status = WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
+			memcpy(&tsbgw_he->db_scheduler_handle, bgw_handle, sizeof(BackgroundWorkerHandle));
+			tsbgw_he->valid_db_scheduler_handle = true;
+			ereport(LOG,(errmsg("The pointer to db_scheduler is: %p Struct: %d , %lu ", &tsbgw_he->db_scheduler_handle, tsbgw_he->db_scheduler_handle.slot,tsbgw_he->db_scheduler_handle.generation)));
+			status = WaitForBackgroundWorkerStartup(&tsbgw_he->db_scheduler_handle, &worker_pid);
 			strcpy(tsbgw_he->ts_version, version);
 			ereport(LOG, (errmsg("Versioned worker started with PID %d", worker_pid)));	
 		}
