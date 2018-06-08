@@ -91,6 +91,7 @@ extern void timescale_bgw_db_scheduler_main(Oid db_id){
         ereport(LOG, (errmsg("Total Workers = %d", get_total_workers())));
     }
     ereport(LOG, (errmsg("Exiting db %d", db_id)));
+    /* TODO: Kill children when they exist*/
     decrement_total_workers();
     proc_exit(1);
  
