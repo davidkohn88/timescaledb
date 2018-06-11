@@ -96,7 +96,46 @@ static tsbgw_shared_state* get_tsbgw_shared_state(bool possible_restart){
 	return tsbgw_ss;
 }
 
+/*
+ * Wait for a background worker to stop. With a timeout. Modified version of WaitForBackgroundWorkerShutdown in bgworker.c.
+ *
+ * If the worker hasn't yet started, or is running, we wait for it to stop
+ * and then return BGWH_STOPPED.  However, if the postmaster has died, we give
+ * up and return BGWH_POSTMASTER_DIED, because it's the postmaster that
+ * notifies us when a worker's state changes. We check on a timeout in case we haven't been notified, because unlike
+ * the normal version we haven't necessarily registered to be notified of BGWorkerShutdown.
+ * timeout is in seconds
+ */
 
+#define TSBGW_CHECK_TIMEOUT 1
+static BgwHandleStatus WaitForBackgroundWorkerShutdownWithTimeout(BackgroundWorkerHandle *handle, int timeout)
+{
+	BgwHandleStatus status;
+	int			rc;
+    pid_t		pid;
+    int         timing;
+
+	for (timing = 0; timing < timeout; timing += TSBGW_CHECK_TIMEOUT)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		status = GetBackgroundWorkerPid(handle, &pid);
+		if (status == BGWH_STOPPED)
+			break;
+
+		rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_POSTMASTER_DEATH | WL_TIMEOUT, TSBGW_CHECK_TIMEOUT * 1000L, WAIT_EVENT_BGWORKER_SHUTDOWN);
+
+		if (rc & WL_POSTMASTER_DEATH)
+		{
+			status = BGWH_POSTMASTER_DIED;
+			break;
+		}
+        
+		ResetLatch(MyLatch);
+	}
+
+	return status;
+}
 static void increment_total_workers(void)  {
     volatile tsbgw_shared_state *ss = (volatile tsbgw_shared_state *) get_tsbgw_shared_state(false);
     SpinLockAcquire(&ss->mutex);

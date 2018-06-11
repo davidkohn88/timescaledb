@@ -633,7 +633,11 @@ Datum timescale_bgw_db_scheduler_pre_version_change(PG_FUNCTION_ARGS){
 	{
 		TerminateBackgroundWorker(old_scheduler_handle);
 		ereport(LOG, (errmsg("Waiting for shutdown")));
-		WaitForBackgroundWorkerShutdown(old_scheduler_handle);
+		
+		if (WaitForBackgroundWorkerShutdownWithTimeout(old_scheduler_handle, 60) != BGWH_STOPPED) 
+		{
+			ereport(ERROR, (errmsg("Previous Background Workers Timed Out While Shutting Down")));
+		}
 	}
 	ereport(LOG, (errmsg("About to start up")));
 	if (register_tsbgw_entrypoint_for_db(MyDatabaseId, vxid, &new_entrypoint_handle))
