@@ -29,6 +29,7 @@ endif (MSVC)
 endif (WIN32)
 
 set(HEADERS
+  background_jobs.h
   cache.h
   catalog.h
   chunk_constraint.h
@@ -64,12 +65,12 @@ set(HEADERS
   scanner.h
   subspace_store.h
   tablespace.h
-  timescale_bgw.h
   trigger.h
   utils.h)
 
 set(SOURCES
   agg_bookend.c
+  background_jobs.c
   cache.c
   cache_invalidate.c
   catalog.c
@@ -106,7 +107,6 @@ set(SOURCES
   sort_transform.c
   subspace_store.c
   tablespace.c
-  timescale_bgw.c
   trigger.c
   utils.c
   version.c)
