@@ -2,7 +2,7 @@
 #define BGW_MESSAGE_QUEUE_H
 
 #include <postgres.h>
-#include <storage/shm_mq.h>
+#include <storage/dsm.h>
 
 
 typedef enum tsbgwMessageType {

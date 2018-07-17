@@ -5,13 +5,13 @@
 #include <storage/shmem.h>
 #include <storage/proc.h>
 #include <storage/procarray.h>
-#include <storage/dsm.h>   
+#include <storage/shm_mq.h>
 
 #include "bgw_message_queue.h"
 
 #define TSBGW_MAX_MESSAGES 16
 #define TSBGW_MESSAGE_QUEUE_NAME "timescale_bgw_message_queue"
-#define TSBGW_LW_TRANCHE_NAME "timescale_bgw_lock_tranche"
+#define TSBGW_MQ_TRANCHE_NAME "timescale_bgw_mq_tranche"
 
 #define TSBGW_ACK_QUEUE_SIZE (MAXALIGN(shm_mq_minimum_size + sizeof(int)))
 typedef struct tsbgwMessageQueue{
@@ -43,7 +43,7 @@ static tsbgwMessageQueue* tsbgw_message_queue_attach(bool possible_restart){
         if (!found)
         {
             memset(tsbgw_mq, 0, sizeof(tsbgwMessageQueue));
-            tsbgw_mq->lock = &(GetNamedLWLockTranche(TSBGW_LW_TRANCHE_NAME))->lock;
+            tsbgw_mq->lock = &(GetNamedLWLockTranche(TSBGW_MQ_TRANCHE_NAME))->lock;
         }
         LWLockRelease(AddinShmemInitLock);
     }
@@ -58,7 +58,7 @@ extern void tsbgw_message_queue_shmem_startup(void){
 /* this is called in the loader during server startup to allocate a shared memory segment*/
 extern void tsbgw_message_queue_alloc(void){
     RequestAddinShmemSpace(sizeof(tsbgwMessageQueue));
-    RequestNamedLWLockTranche(TSBGW_LW_TRANCHE_NAME, 1);
+    RequestNamedLWLockTranche(TSBGW_MQ_TRANCHE_NAME, 1);
 }
 
 
@@ -141,20 +141,23 @@ extern bool tsbgw_message_send_and_wait(tsbgwMessage *message){
     Size            bytes_received=0;
     void            *data;
 
-    seg = dsm_attach(message->ack_dsm_handle);
+    seg = dsm_find_mapping(message->ack_dsm_handle);
     ack_queue = shm_mq_create(dsm_segment_address(seg), TSBGW_ACK_QUEUE_SIZE);
-    ack_queue_handle = shm_mq_attach(ack_queue, seg, NULL);
     shm_mq_set_receiver(ack_queue, MyProc);
+    Assert(shm_mq_get_receiver(ack_queue) == MyProc); 
+    ack_queue_handle = shm_mq_attach(ack_queue, seg, NULL);
+    Assert(shm_mq_get_receiver(ack_queue) == MyProc); 
+
 
     send_result = tsbgw_message_queue_add(tsbgw_message_queue_attach(false), message);
 
     if (send_result){
+        Assert(shm_mq_get_receiver(ack_queue) == MyProc); 
         receipt = shm_mq_receive(ack_queue_handle, &bytes_received, &data, false);
         send_result = false;
         if (bytes_received)
             send_result = *((bool*) data);
     }
-    shm_mq_detach(ack_queue_handle);
     dsm_detach(seg);
     pfree(message);
     return send_result;
@@ -178,12 +181,11 @@ extern void tsbgw_message_send_ack(tsbgwMessage *message, bool success){
 
     seg = dsm_attach(message->ack_dsm_handle);
     ack_queue = shm_mq_create(dsm_segment_address(seg), TSBGW_ACK_QUEUE_SIZE);
-    ack_queue_handle = shm_mq_attach(ack_queue, seg, NULL);
     shm_mq_set_sender(ack_queue, MyProc);
+    ack_queue_handle = shm_mq_attach(ack_queue, seg, NULL);
 
     shm_mq_send(ack_queue_handle, sizeof(bool), &success, false);
 
-    shm_mq_detach(ack_queue_handle);
     dsm_detach(seg);
     pfree(message);
 
