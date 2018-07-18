@@ -139,26 +139,23 @@ extern bool tsbgw_message_send_and_wait(tsbgwMessage *message){
     shm_mq_handle   *ack_queue_handle;
     shm_mq_result   receipt;
     Size            bytes_received=0;
-    void            *data;
+    bool            *data;
 
     seg = dsm_find_mapping(message->ack_dsm_handle);
     ack_queue = shm_mq_create(dsm_segment_address(seg), TSBGW_ACK_QUEUE_SIZE);
     shm_mq_set_receiver(ack_queue, MyProc);
-    Assert(shm_mq_get_receiver(ack_queue) == MyProc); 
     ack_queue_handle = shm_mq_attach(ack_queue, seg, NULL);
-    Assert(shm_mq_get_receiver(ack_queue) == MyProc); 
 
 
     send_result = tsbgw_message_queue_add(tsbgw_message_queue_attach(false), message);
 
     if (send_result){
-        Assert(shm_mq_get_receiver(ack_queue) == MyProc); 
-        receipt = shm_mq_receive(ack_queue_handle, &bytes_received, &data, false);
-        send_result = false;
-        if (bytes_received)
-            send_result = *((bool*) data);
+        receipt = shm_mq_wait_for_attach(ack_queue_handle);
+        if (receipt == SHM_MQ_SUCCESS)
+            receipt = shm_mq_receive(ack_queue_handle, &bytes_received, (void**) &data, false);
+        send_result = (bytes_received != 0) && *data;
     }
-    dsm_detach(seg);
+    dsm_detach(seg); /*queue detach happens in dsm detach callback*/
     pfree(message);
     return send_result;
 }
@@ -180,13 +177,10 @@ extern void tsbgw_message_send_ack(tsbgwMessage *message, bool success){
     shm_mq_handle   *ack_queue_handle;
 
     seg = dsm_attach(message->ack_dsm_handle);
-    ack_queue = shm_mq_create(dsm_segment_address(seg), TSBGW_ACK_QUEUE_SIZE);
+    ack_queue = dsm_segment_address(seg);
     shm_mq_set_sender(ack_queue, MyProc);
     ack_queue_handle = shm_mq_attach(ack_queue, seg, NULL);
-
     shm_mq_send(ack_queue_handle, sizeof(bool), &success, false);
-
     dsm_detach(seg);
     pfree(message);
-
 }
