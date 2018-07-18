@@ -1,7 +1,7 @@
 #ifndef TIMESCALEDB_EXTENSION_H
 #define TIMESCALEDB_EXTENSION_H
 #include <postgres.h>
-    
+
 
 #define EXTENSION_NAME "timescaledb"
 #define MAX_VERSION_LEN (NAMEDATALEN+1)
