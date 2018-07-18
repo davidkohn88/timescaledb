@@ -294,7 +294,6 @@ static void stop_all_db_schedulers(HTAB *db_htab){
     
     while ((current_entry = hash_seq_search(&hash_seq)) != NULL) 
     {
-        pid_t               worker_pid;
         BgwHandleStatus     worker_status;
 
         TerminateBackgroundWorker(current_entry->db_scheduler_handle);
@@ -325,35 +324,74 @@ static void launcher_handle_messages(HTAB *db_htab){
         VirtualTransactionId    vxid;
         bool                    worker_registered;
         
+        sender = BackendPidGetProc(message->sender_pid);
+        if (sender != NULL)
+            GET_VXID_FROM_PGPROC(vxid, *sender);
+        else
+        {
+            ereport(LOG,(errmsg("timescalebgw cluster launcher received message from non-existent backend")));
+            continue;
+        }
 
         switch (message->message_type){
-            case RESTART:
-                sender = BackendPidGetProc(message->sender_pid);
-                if (sender != NULL)
-                    GET_VXID_FROM_PGPROC(vxid, *sender);
-                else
-                {
-                    ereport(LOG,(errmsg("timescalebgw cluster launcher received message from non-existent backend")));
-                    break;
-                }
+            case START:
+                ereport(LOG, (errmsg("in start condition")));
 
-                tsbgw_he = hash_search(db_htab, &sender->databaseId, HASH_ENTER, &found);
+                /* 
+                 * we've just run check_for_stopped_schedulers, so we know if we have found this
+                 * in our hashtable that it is still alive and we want to be idempotent, 
+                 * so don't need to do anything
+                 */
+                tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_ENTER, &found);
+                if (!found)
+                {
+                    if(!DatumGetBool(DirectFunctionCall1(timescale_bgw_increment_total_workers, Int32GetDatum(TIMESCALE_MAX_WORKERS_GUC_STANDIN))))
+                        ereport(ERROR, (errmsg("timescale background worker could not be started")));
+                    worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
+		            if (worker_registered)
+                    {
+                        pid_t           worker_pid;
+			            WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
+			            ereport(LOG, (errmsg("Worker started with PID %d", worker_pid )));
+                    }
+                }
+                tsbgw_message_send_ack(message, true);
+                break;
+            case STOP:
+                ereport(LOG, (errmsg("in stop condition")));
+
+                tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
+                if (found)
+                {   
+                    TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
+                    WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
+                    DirectFunctionCall1(timescale_bgw_decrement_total_workers, Int8GetDatum(0));
+                }
+                tsbgw_message_send_ack(message, true);
+                break;
+            
+            case RESTART:
+                ereport(LOG, (errmsg("in restart condition")));
+
+                tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_ENTER, &found);
                 if (found)
                 {   
                     TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
                     WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
                 }
+                else if(!DatumGetBool(DirectFunctionCall1(timescale_bgw_increment_total_workers, Int32GetDatum(TIMESCALE_MAX_WORKERS_GUC_STANDIN))))
+                    ereport(ERROR, (errmsg("timescale background worker could not be started")));
+
                 tsbgw_message_send_ack(message, true);
                 worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
-		        if (worker_registered){
+		        if (worker_registered)
+                {
                     pid_t           worker_pid;
 			        WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
 			        ereport(LOG, (errmsg("Worker started with PID %d", worker_pid )));
 		        } 
-                
-
                 break;
-            default: /* not dealing with stop/start yet*/
+            default: 
                 ereport(LOG, ((errmsg("timescalebgw cluster launcher unexpected message received."))));
         }
     }
@@ -480,10 +518,36 @@ Datum timescale_bgw_restart_db_workers(PG_FUNCTION_ARGS){
     tsbgwMessage            *message;
     bool                    success;
 
-    message = tsbgw_message_create(RESTART);
+    message = tsbgw_message_create(RESTART, MyDatabaseId);
     success = tsbgw_message_send_and_wait(message);
 	PG_RETURN_BOOL(success);
-}	
+}
+Datum timescale_bgw_start_db_workers(PG_FUNCTION_ARGS){
+    tsbgwMessage            *message;
+    bool                    success;
+
+    message = tsbgw_message_create(START, MyDatabaseId);
+    success = tsbgw_message_send_and_wait(message);
+	PG_RETURN_BOOL(success);
+}
+Datum timescale_bgw_stop_db_workers(PG_FUNCTION_ARGS){
+    tsbgwMessage            *message;
+    bool                    success;
+
+    message = tsbgw_message_create(STOP, MyDatabaseId);
+    success = tsbgw_message_send_and_wait(message);
+	PG_RETURN_BOOL(success);
+}
+
+
+/* called by the loader when we intercept a drop database statement, must pass in oid rather than use MyDatabaseId*/
+extern void timescale_bgw_on_db_drop(Oid dropped_oid){
+    tsbgwMessage            *message;
+    bool                    success; 
+
+    message = tsbgw_message_create(STOP, dropped_oid);
+    success = tsbgw_message_send_and_wait(message);    
+}
 
 extern void timescale_bgw_register_cluster_launcher(void) {
     BackgroundWorker worker;

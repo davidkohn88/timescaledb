@@ -112,7 +112,7 @@ static tsbgwMessage* tsbgw_message_queue_remove(tsbgwMessageQueue *queue){
 }
 
 /*construct a message*/
-extern tsbgwMessage* tsbgw_message_create(tsbgwMessageType message_type){
+extern tsbgwMessage* tsbgw_message_create(tsbgwMessageType message_type, Oid db_oid){
     tsbgwMessage          *message = palloc(sizeof(tsbgwMessage));
     dsm_segment           *seg;
     
@@ -121,6 +121,7 @@ extern tsbgwMessage* tsbgw_message_create(tsbgwMessageType message_type){
     *message = (tsbgwMessage){
         .message_type = message_type,
         .sender_pid = MyProcPid,
+        .db_oid = db_oid, 
         .ack_dsm_handle = dsm_segment_handle(seg),
         .offset_to_shm_mq = 0
         };
