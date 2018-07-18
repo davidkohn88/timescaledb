@@ -15,3 +15,10 @@ DROP TRIGGER IF EXISTS "0_cache_inval" ON _timescaledb_catalog.chunk;
 DROP TRIGGER IF EXISTS "0_cache_inval" ON _timescaledb_catalog.chunk_constraint;
 DROP TRIGGER IF EXISTS "0_cache_inval" ON _timescaledb_catalog.dimension_slice;
 DROP TRIGGER IF EXISTS "0_cache_inval" ON _timescaledb_catalog.dimension;
+
+CREATE OR REPLACE FUNCTION _timescaledb_internal.restart_background_workers()
+RETURNS VOID 
+AS '@LOADER_PATHNAME@', 'timescale_bgw_restart_db_workers'
+LANGUAGE C VOLATILE;
+
+SELECT _timescaledb_internal.restart_background_workers();

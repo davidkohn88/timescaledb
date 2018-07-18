@@ -2,8 +2,9 @@ set(INSTALL_FILE ${PROJECT_NAME}--${PROJECT_VERSION_MOD}.sql)
 
 # Source files that define the schemas and tables for our metadata
 set(CATALOG_SOURCE_FILES
-  schemas.sql # Must be first
-  tables.sql
+  catalog/schemas.sql # Must be first
+  catalog/init_bgw.sql
+  catalog/tables.sql
 )
 
 # The rest of the source files defining mostly functions
@@ -23,12 +24,13 @@ set(SOURCE_FILES
   size_utils.sql
   histogram.sql
   cache.sql
+  background_jobs.sql
 )
 
 # These files should be pre-pended to update scripts so that they are
 # executed before anything else during updates
 set(PRE_UPDATE_FILES
-  updates/pre-global.sql
+  updates/pre-update.sql
 )
 
 # These files represent the modifications that happen in each version,
@@ -57,6 +59,7 @@ set(MOD_FILES
 )
 
 set(MODULE_PATHNAME "$libdir/timescaledb-${PROJECT_VERSION_MOD}")
+set(LOADER_PATHNAME "$libdir/timescaledb")
 
 # Function to replace @MODULE_PATHNAME@ in source files, producing an
 # output file in the build dir

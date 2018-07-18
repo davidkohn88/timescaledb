@@ -11,6 +11,7 @@
 #include <utils/inval.h>
 #include <nodes/print.h>
 #include <server/fmgr.h>
+#include <commands/dbcommands.h>
 
 #include "../extension_utils.c"
 
@@ -205,7 +206,21 @@ load_utility_cmd(Node *utility_stmt)
 
 static void
 post_analyze_hook(ParseState *pstate, Query *query)
-{
+{	
+	/*
+	 * If we drop a database, we need to intercept and stop any of our workers that might be connected to said db. 
+	 */
+	if (query->commandType == CMD_UTILITY && IsA(query->utilityStmt, DropdbStmt))
+	{
+		DropdbStmt *drop_db_statement = (DropdbStmt *) query->utilityStmt;
+		Oid dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
+		if (dropped_db_oid != InvalidOid)
+		{
+			ereport(LOG,(errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
+			timescale_bgw_on_db_drop(dropped_db_oid);
+		}
+		return;
+	}
 	if (!guc_disable_load &&
 		(query->commandType != CMD_UTILITY || load_utility_cmd(query->utilityStmt)))
 		extension_check();

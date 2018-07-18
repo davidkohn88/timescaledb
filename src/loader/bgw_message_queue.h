@@ -15,13 +15,14 @@ typedef struct tsbgwMessage {
     tsbgwMessageType    message_type;
     
     pid_t               sender_pid;
+    Oid                 db_oid;
     dsm_handle          ack_dsm_handle;       
     size_t              offset_to_shm_mq;
 
 } tsbgwMessage;
 
 
-extern tsbgwMessage* tsbgw_message_create(tsbgwMessageType message_type);
+extern tsbgwMessage* tsbgw_message_create(tsbgwMessageType message_type, Oid db_oid);
 extern bool tsbgw_message_send_and_wait(tsbgwMessage *message);
 
 /* called only by the launcher*/
