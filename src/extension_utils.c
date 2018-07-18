@@ -72,10 +72,11 @@ extension_version(void)
 	ScanKeyData entry[1];
 	bool		is_null = true;
 	static char *sql_version = NULL;
+
 	/*
-	 * This function assumes that you are within a transaction context. 
-	 * It will fail to run if we are outside of a txn context, as it will not know
-	 * which tuples in the catalog are valid.
+	 * This function assumes that you are within a transaction context. It
+	 * will fail to run if we are outside of a txn context, as it will not
+	 * know which tuples in the catalog are valid.
 	 */
 	rel = heap_open(ExtensionRelationId, AccessShareLock);
 
@@ -234,4 +235,3 @@ extension_load_without_preload()
 		return;
 	}
 }
-

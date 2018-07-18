@@ -36,10 +36,10 @@
  * 2) We actually don't want to load the extension in two cases:
  *	  a) We are upgrading the extension.
  *	  b) We set the guc timescaledb.disable_load.
- * 
- * 3) We include a section for the bgw launcher and some workers below the rest, separated with its own notes, 
- *   some function definitions are included as they are referenced by other loader functions. 
- * 
+ *
+ * 3) We include a section for the bgw launcher and some workers below the rest, separated with its own notes,
+ *   some function definitions are included as they are referenced by other loader functions.
+ *
  */
 
 #ifdef PG_MODULE_MAGIC
@@ -206,17 +206,19 @@ load_utility_cmd(Node *utility_stmt)
 
 static void
 post_analyze_hook(ParseState *pstate, Query *query)
-{	
+{
 	/*
-	 * If we drop a database, we need to intercept and stop any of our workers that might be connected to said db. 
+	 * If we drop a database, we need to intercept and stop any of our workers
+	 * that might be connected to said db.
 	 */
 	if (query->commandType == CMD_UTILITY && IsA(query->utilityStmt, DropdbStmt))
 	{
 		DropdbStmt *drop_db_statement = (DropdbStmt *) query->utilityStmt;
-		Oid dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
+		Oid			dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
+
 		if (dropped_db_oid != InvalidOid)
 		{
-			ereport(LOG,(errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
+			ereport(LOG, (errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
 			timescale_bgw_on_db_drop(dropped_db_oid);
 		}
 		return;
@@ -241,13 +243,15 @@ post_analyze_hook(ParseState *pstate, Query *query)
 	}
 }
 
-static void timescale_shmem_startup_hook(void){
+static void
+timescale_shmem_startup_hook(void)
+{
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 	timescale_bgw_shmem_startup();
 	tsbgw_message_queue_shmem_startup();
 }
-	static void
+static void
 extension_mark_loader_present()
 {
 	void	  **presentptr = find_rendezvous_variable(RENDEZVOUS_LOADER_PRESENT_NAME);
@@ -265,7 +269,7 @@ _PG_init(void)
 	extension_mark_loader_present();
 
 	elog(INFO, "timescaledb loaded");
-	
+
 	timescale_bgw_shmem_init();
 	tsbgw_message_queue_alloc();
 	timescale_bgw_register_cluster_launcher();
@@ -293,7 +297,7 @@ _PG_init(void)
 	 * hook
 	 */
 	prev_post_parse_analyze_hook = post_parse_analyze_hook;
-	/*register shmem startup hook for the background worker stuff */
+	/* register shmem startup hook for the background worker stuff */
 	prev_shmem_startup_hook = shmem_startup_hook;
 
 
@@ -403,22 +407,3 @@ call_extension_post_parse_analyze_hook(ParseState *pstate,
 		extension_post_parse_analyze_hook(pstate, query);
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
