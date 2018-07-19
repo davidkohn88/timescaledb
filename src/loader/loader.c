@@ -22,6 +22,7 @@
 #include <pgstat.h>
 
 #include "timescale_bgw_internal.h"
+#include "timescale_bgw.h"
 #include "bgw_message_queue.h"
 #define PG96 ((PG_VERSION_NUM >= 90600) && (PG_VERSION_NUM < 100000))
 #define PG10 ((PG_VERSION_NUM >= 100000) && (PG_VERSION_NUM < 110000))
@@ -207,21 +208,30 @@ load_utility_cmd(Node *utility_stmt)
 static void
 post_analyze_hook(ParseState *pstate, Query *query)
 {
-	/*
-	 * If we drop a database, we need to intercept and stop any of our workers
-	 * that might be connected to said db.
-	 */
-	if (query->commandType == CMD_UTILITY && IsA(query->utilityStmt, DropdbStmt))
-	{
-		DropdbStmt *drop_db_statement = (DropdbStmt *) query->utilityStmt;
-		Oid			dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
 
-		if (dropped_db_oid != InvalidOid)
+	if (query->commandType == CMD_UTILITY)
+	{
+		/*
+		* If we drop a database, we need to intercept and stop any of our workers
+		* that might be connected to said db.
+		*/
+		if (IsA(query->utilityStmt, DropdbStmt))
 		{
-			ereport(LOG, (errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
-			timescale_bgw_on_db_drop(dropped_db_oid);
+			DropdbStmt *drop_db_statement = (DropdbStmt *) query->utilityStmt;
+			Oid			dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
+
+			if (dropped_db_oid != InvalidOid)
+			{
+				ereport(LOG, (errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
+				timescale_bgw_on_db_drop(dropped_db_oid);
+			}
+			return;
 		}
-		return;
+		else if (drop_statement_drops_extension((DropStmt *) query->utilityStmt))
+		/* if we drop the extension we should restart the worker (restart in case of rollbacks)*/
+		{
+			DirectFunctionCall1(timescale_bgw_restart_db_workers, Int8GetDatum(0));
+		}
 	}
 	if (!guc_disable_load &&
 		(query->commandType != CMD_UTILITY || load_utility_cmd(query->utilityStmt)))

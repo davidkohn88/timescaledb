@@ -8,17 +8,17 @@
 
 /* Interface for both the loader and the versioned extension*/
 
-PG_FUNCTION_INFO_V1(timescale_bgw_increment_total_workers);
-PG_FUNCTION_INFO_V1(timescale_bgw_decrement_total_workers);
-PG_FUNCTION_INFO_V1(timescale_bgw_get_total_workers);
 
-PG_FUNCTION_INFO_V1(timescale_bgw_restart_db_workers);
+extern Datum timescale_bgw_increment_total_workers(PG_FUNCTION_ARGS);
+extern Datum timescale_bgw_decrement_total_workers(PG_FUNCTION_ARGS);
+extern Datum timescale_bgw_get_total_workers(PG_FUNCTION_ARGS);
 
-PG_FUNCTION_INFO_V1(timescale_bgw_start_db_workers);
+extern Datum timescale_bgw_restart_db_workers(PG_FUNCTION_ARGS);
 
-PG_FUNCTION_INFO_V1(timescale_bgw_stop_db_workers);
+extern Datum timescale_bgw_start_db_workers(PG_FUNCTION_ARGS);
+
+extern Datum timescale_bgw_stop_db_workers(PG_FUNCTION_ARGS);
 
 
 
-
-#endif
+#endif /* TIMESCALE_BGW_H*/

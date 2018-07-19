@@ -10,8 +10,11 @@ extern void timescale_bgw_shmem_init(void);
 extern void timescale_bgw_shmem_startup(void);
 
 extern void timescale_bgw_on_db_drop(Oid dropped_db);
+extern void timescale_bgw_on_db_create(Oid created_db);
 
 extern void timescale_bgw_register_cluster_launcher(void);
+
+
 extern void timescale_bgw_cluster_launcher_main(void);	/* this has to be called
 														 * by the postmaster at
 														 * bgw startup a so must
