@@ -33,11 +33,9 @@
 
 #include "../extension.h"
 #include "../extension_utils.c"
-#include "timescale_bgw.h"
 #include "timescale_bgw_internal.h"
 #include "bgw_message_queue.h"
-
-
+#define TIMESCALE_MAX_WORKERS_GUC_STANDIN 8
 #define TSBGW_SS_NAME "timescale_bgw_shared_state"
 #define TSBGW_DB_SCHEDULER_FUNCNAME "timescale_bgw_db_scheduler_main"
 #define TSBGW_ENTRYPOINT_FUNCNAME "timescale_bgw_db_scheduler_entrypoint"
@@ -54,6 +52,15 @@
  * shared_preload_libraries time.
  */
 
+PG_FUNCTION_INFO_V1(timescale_bgw_increment_total_workers);
+PG_FUNCTION_INFO_V1(timescale_bgw_decrement_total_workers);
+PG_FUNCTION_INFO_V1(timescale_bgw_get_total_workers);
+
+PG_FUNCTION_INFO_V1(timescale_bgw_restart_db_workers);
+
+PG_FUNCTION_INFO_V1(timescale_bgw_start_db_workers);
+
+PG_FUNCTION_INFO_V1(timescale_bgw_stop_db_workers);
 
 /*
  * We still need a bit of shared state here to deal with keeping track of
@@ -230,7 +237,6 @@ populate_database_htab(void)
 
 	rel = heap_open(DatabaseRelationId, AccessShareLock);
 	scan = heap_beginscan_catalog(rel, 0, NULL);
-
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
@@ -426,7 +432,6 @@ launcher_handle_messages(HTAB *db_htab)
 				else if (!DatumGetBool(DirectFunctionCall1(timescale_bgw_increment_total_workers, Int32GetDatum(TIMESCALE_MAX_WORKERS_GUC_STANDIN))))
 					ereport(ERROR, (errmsg("timescale background worker could not be started")));
 
-				tsbgw_message_send_ack(message, true);
 				worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
 				if (worker_registered)
 				{
@@ -435,6 +440,7 @@ launcher_handle_messages(HTAB *db_htab)
 					WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
 					ereport(LOG, (errmsg("Worker started with PID %d", worker_pid)));
 				}
+                tsbgw_message_send_ack(message, true);
 				break;
 			default:
 				ereport(LOG, ((errmsg("timescalebgw cluster launcher unexpected message received."))));
@@ -447,8 +453,7 @@ timescale_bgw_cluster_launcher_main(void)
 {
 
 	tsbgwSharedState *tsbgw_ss = get_tsbgw_shared_state(false);
-	HTAB	   *db_htab;
-
+	HTAB	    *db_htab;
 
 	pqsignal(SIGTERM, timescale_bgw_sigterm);
 	BackgroundWorkerUnblockSignals();
@@ -461,9 +466,9 @@ timescale_bgw_cluster_launcher_main(void)
 		ereport(LOG, (errmsg("Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.", TIMESCALE_MAX_WORKERS_GUC_STANDIN)));
 		proc_exit(0);
 	}
-
 	/* Connect to the db, no db name yet, so can only access shared catalogs */
 	BackgroundWorkerInitializeConnection(NULL, NULL);
+    pgstat_report_appname("Timescale BGW Cluster Launcher");
 	db_htab = populate_database_htab();
 
 	/*
@@ -511,7 +516,6 @@ timescale_bgw_cluster_launcher_main(void)
  * TODO: Make sure no race conditions if this is called multiple times when, say, upgrading or through the sql interface.
  */
 
-
 extern void
 timescale_bgw_db_scheduler_entrypoint(Oid db_id)
 {
@@ -522,25 +526,28 @@ timescale_bgw_db_scheduler_entrypoint(Oid db_id)
 
 	/* unblock signals and use default signal handlers */
 	BackgroundWorkerUnblockSignals();
+
 	ereport(LOG, (errmsg("Worker started for Database id = %d with pid %d", db_id, MyProcPid)));
 	BackgroundWorkerInitializeConnectionByOid(db_id, InvalidOid);
 	ereport(LOG, (errmsg("Connected to db %d", db_id)));
-
+    pgstat_report_appname(MyBgworkerEntry->bgw_name);
 	/*
 	 * Wait until whatever vxid that potentially called us finishes before we
-	 * get a transaction so we can see the correct state after its effects
+	 * happens in a txn so it's cleaned up correctly if we get a sigkill in the meantime,
+     * but we will need stop after and take a new txn so we can see the correct state after its effects
 	 */
-	memcpy(&vxid, MyBgworkerEntry->bgw_extra, sizeof(VirtualTransactionId));
+    StartTransactionCommand();
+	(void) GetTransactionSnapshot();
+    memcpy(&vxid, MyBgworkerEntry->bgw_extra, sizeof(VirtualTransactionId));
 	if (VirtualTransactionIdIsValid(vxid))
 		VirtualXactLock(vxid, true);
-
-
+    CommitTransactionCommand();
 
 	/* now we can start our transaction and get the version currently
 	 * installed */
-	StartTransactionCommand();
-	(void) GetTransactionSnapshot();
 
+    StartTransactionCommand();
+	(void) GetTransactionSnapshot();
 	ts_installed = extension_exists();
 	if (ts_installed)
 		StrNCpy(version, extension_version(), MAX_VERSION_LEN);
@@ -619,7 +626,6 @@ timescale_bgw_on_db_drop(Oid dropped_oid)
 	message = tsbgw_message_create(STOP, dropped_oid);
 	success = tsbgw_message_send_and_wait(message);
 }
-
 extern void
 timescale_bgw_register_cluster_launcher(void)
 {
