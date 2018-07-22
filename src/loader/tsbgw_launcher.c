@@ -11,10 +11,7 @@
 #include <storage/shmem.h>
 
 
-/* needed for initializing shared memory and using various locks */
-#include <storage/lwlock.h>
-#include <utils/hsearch.h>
-#include <storage/spin.h>
+
 
 /* for setting our wait event during waitlatch*/
 #include <pgstat.h>
@@ -33,12 +30,12 @@
 
 #include "../extension.h"
 #include "../extension_utils.c"
-#include "timescale_bgw_internal.h"
-#include "bgw_message_queue.h"
-#define TIMESCALE_MAX_WORKERS_GUC_STANDIN 8
-#define TSBGW_SS_NAME "timescale_bgw_shared_state"
-#define TSBGW_DB_SCHEDULER_FUNCNAME "timescale_bgw_db_scheduler_main"
-#define TSBGW_ENTRYPOINT_FUNCNAME "timescale_bgw_db_scheduler_entrypoint"
+#include "tsbgw_counter.h"
+#include "tsbgw_message_queue.h"
+#include "tsbgw_launcher.h"
+
+#define TSBGW_DB_SCHEDULER_FUNCNAME "tsbgw_db_scheduler_main"
+#define TSBGW_ENTRYPOINT_FUNCNAME "tsbgw_db_scheduler_entrypoint"
 #define TSBGW_LAUNCHER_RESTART_TIME 10
 /*
  * Main bgw launcher for the cluster. Run through the timescale loader, so needs to have a
@@ -52,29 +49,8 @@
  * shared_preload_libraries time.
  */
 
-PG_FUNCTION_INFO_V1(timescale_bgw_increment_total_workers);
-PG_FUNCTION_INFO_V1(timescale_bgw_decrement_total_workers);
-PG_FUNCTION_INFO_V1(timescale_bgw_get_total_workers);
 
-PG_FUNCTION_INFO_V1(timescale_bgw_restart_db_workers);
 
-PG_FUNCTION_INFO_V1(timescale_bgw_start_db_workers);
-
-PG_FUNCTION_INFO_V1(timescale_bgw_stop_db_workers);
-
-/*
- * We still need a bit of shared state here to deal with keeping track of
- * the total number of background workers we've launched across the instance
- * since we don't want to exceed some configured value.
- * We were excited, briefly, about the possibility of using pg_sema for this,
- * unfortunately it does not appear to be accessible to code outside of postgres
- * core in any meaningful way. So we're not using that.
- */
-typedef struct tsbgwSharedState
-{
-	slock_t		mutex;			/* controls modification of total_workers */
-	int			total_workers;
-}			tsbgwSharedState;
 
 typedef struct tsbgwHashEntry
 {
@@ -83,78 +59,10 @@ typedef struct tsbgwHashEntry
 													 * properly */
 }			tsbgwHashEntry;
 
-static tsbgwSharedState * get_tsbgw_shared_state(bool possible_restart)
-{
-	static tsbgwSharedState * tsbgw_ss = NULL;
-	bool		found;
-
-	/* reset in case this is a restart within the postmaster */
-	if (possible_restart)
-		tsbgw_ss = NULL;
-	if (tsbgw_ss == NULL)
-	{
-		LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-		tsbgw_ss = ShmemInitStruct(TSBGW_SS_NAME, sizeof(tsbgwSharedState), &found);
-		if (!found)				/* initialize the shared memory structure */
-		{
-			SpinLockInit(&tsbgw_ss->mutex);
-			tsbgw_ss->total_workers = 0;
-		}
-
-		LWLockRelease(AddinShmemInitLock);
-	}
-	return tsbgw_ss;
-}
 
 
-extern void
-timescale_bgw_shmem_startup(void)
-{
-	/* possible_restart = true in case this is a restart within the postmaster */
-	get_tsbgw_shared_state(true);
-}
 
 
-extern Datum
-timescale_bgw_increment_total_workers(PG_FUNCTION_ARGS)
-{
-	bool		incremented = false;
-	int16		max_workers = PG_GETARG_INT32(0);
-	tsbgwSharedState *ss = get_tsbgw_shared_state(false);
-
-	SpinLockAcquire(&ss->mutex);
-	if (ss->total_workers < max_workers)	/* result can be <= max_workers,
-											 * so we test for less than */
-	{
-		ss->total_workers++;
-		incremented = true;
-	}
-	SpinLockRelease(&ss->mutex);
-	PG_RETURN_BOOL(incremented);
-}
-
-extern Datum
-timescale_bgw_decrement_total_workers(PG_FUNCTION_ARGS)
-{
-	tsbgwSharedState *ss = get_tsbgw_shared_state(false);
-
-	SpinLockAcquire(&ss->mutex);
-	ss->total_workers--;
-	SpinLockRelease(&ss->mutex);
-	PG_RETURN_VOID();
-}
-
-extern Datum
-timescale_bgw_get_total_workers(PG_FUNCTION_ARGS)
-{
-	tsbgwSharedState *ss = get_tsbgw_shared_state(false);
-	int			nworkers;
-
-	SpinLockAcquire(&ss->mutex);
-	nworkers = ss->total_workers;
-	SpinLockRelease(&ss->mutex);
-	PG_RETURN_INT32(nworkers);
-}
 
 
 /*
@@ -186,7 +94,7 @@ register_tsbgw_entrypoint_for_db(Oid db_id, VirtualTransactionId vxid, Backgroun
 
 static volatile sig_atomic_t got_sigterm = false;
 static void
-timescale_bgw_sigterm(SIGNAL_ARGS)
+tsbgw_sigterm(SIGNAL_ARGS)
 {
 	int			save_errno = errno;
 
@@ -319,7 +227,7 @@ check_for_stopped_db_schedulers(HTAB *db_htab)
 	{
 		Oid			dead_oid = lfirst_oid(lc);
 
-		DirectFunctionCall1(timescale_bgw_decrement_total_workers, Int8GetDatum(0));
+		tsbgw_total_workers_decrement();
 		hash_search(db_htab, &dead_oid, HASH_REMOVE, &found);
 		Assert(found);
 	}
@@ -345,7 +253,7 @@ stop_all_db_schedulers(HTAB *db_htab)
 		worker_status = WaitForBackgroundWorkerShutdown(current_entry->db_scheduler_handle);
 		if (worker_status == BGWH_STOPPED)
 		{
-			DirectFunctionCall1(timescale_bgw_decrement_total_workers, Int8GetDatum(0));
+			tsbgw_total_workers_decrement();
 		}
 		else if (worker_status == BGWH_POSTMASTER_DIED) /* bailout */
 		{
@@ -394,7 +302,7 @@ launcher_handle_messages(HTAB *db_htab)
 				tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_ENTER, &found);
 				if (!found)
 				{
-					if (!DatumGetBool(DirectFunctionCall1(timescale_bgw_increment_total_workers, Int32GetDatum(TIMESCALE_MAX_WORKERS_GUC_STANDIN))))
+					if (!tsbgw_total_workers_increment(TSBGW_MAX_WORKERS_GUC_STANDIN))
 						ereport(ERROR, (errmsg("timescale background worker could not be started")));
 					worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
 					if (worker_registered)
@@ -415,7 +323,7 @@ launcher_handle_messages(HTAB *db_htab)
 				{
 					TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
 					WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
-					DirectFunctionCall1(timescale_bgw_decrement_total_workers, Int8GetDatum(0));
+					tsbgw_total_workers_decrement();
 				}
 				tsbgw_message_send_ack(message, true);
 				break;
@@ -429,7 +337,7 @@ launcher_handle_messages(HTAB *db_htab)
 					TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
 					WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
 				}
-				else if (!DatumGetBool(DirectFunctionCall1(timescale_bgw_increment_total_workers, Int32GetDatum(TIMESCALE_MAX_WORKERS_GUC_STANDIN))))
+				else if (!tsbgw_total_workers_increment(TSBGW_MAX_WORKERS_GUC_STANDIN))
 					ereport(ERROR, (errmsg("timescale background worker could not be started")));
 
 				worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
@@ -449,21 +357,21 @@ launcher_handle_messages(HTAB *db_htab)
 }
 
 extern void
-timescale_bgw_cluster_launcher_main(void)
+tsbgw_cluster_launcher_main(void)
 {
 
-	tsbgwSharedState *tsbgw_ss = get_tsbgw_shared_state(false);
+	int         n;
 	HTAB	    *db_htab;
 
-	pqsignal(SIGTERM, timescale_bgw_sigterm);
+	pqsignal(SIGTERM, tsbgw_sigterm);
 	BackgroundWorkerUnblockSignals();
-	if (!DatumGetBool(DirectFunctionCall1(timescale_bgw_increment_total_workers, Int32GetDatum(TIMESCALE_MAX_WORKERS_GUC_STANDIN))))
+	if (!tsbgw_total_workers_increment(TSBGW_MAX_WORKERS_GUC_STANDIN))
 	{
 		/*
 		 * should be the first thing happening so if we already exceeded our
 		 * limits it means we have a limit of 0 and we should just exit
 		 */
-		ereport(LOG, (errmsg("Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.", TIMESCALE_MAX_WORKERS_GUC_STANDIN)));
+		ereport(LOG, (errmsg("Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.",TSBGW_MAX_WORKERS_GUC_STANDIN)));
 		proc_exit(0);
 	}
 	/* Connect to the db, no db name yet, so can only access shared catalogs */
@@ -471,16 +379,12 @@ timescale_bgw_cluster_launcher_main(void)
     pgstat_report_appname("Timescale BGW Cluster Launcher");
 	db_htab = populate_database_htab();
 
-	/*
-	 * don't need to take the spinlock o initialize this cause we're the only
-	 * backend around right now
-	 */
-	tsbgw_ss->total_workers += hash_get_num_entries(db_htab);
-	if (tsbgw_ss->total_workers > TIMESCALE_MAX_WORKERS_GUC_STANDIN)
-	{
-		ereport(LOG, (errmsg("Total databases = %d. Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.", tsbgw_ss->total_workers, TIMESCALE_MAX_WORKERS_GUC_STANDIN)));
-		proc_exit(0);
-	}
+    for (n = 1; n <= hash_get_num_entries(db_htab); n++ )
+        if (!tsbgw_total_workers_increment(TSBGW_MAX_WORKERS_GUC_STANDIN))
+        {
+            ereport(LOG, (errmsg("Total databases = %ld Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.", hash_get_num_entries(db_htab), TSBGW_MAX_WORKERS_GUC_STANDIN)));
+            proc_exit(0);
+        }
 	start_db_schedulers(db_htab);
 
 
@@ -491,18 +395,14 @@ timescale_bgw_cluster_launcher_main(void)
 		check_for_stopped_db_schedulers(db_htab);
 		launcher_handle_messages(db_htab);
 
-
-
 		wl_rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_POSTMASTER_DEATH, 0, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 		if (wl_rc & WL_POSTMASTER_DEATH)
 			proc_exit(1);		/* bailout */
 		CHECK_FOR_INTERRUPTS();
-
-
 	}
 	stop_all_db_schedulers(db_htab);
-	proc_exit(0);
+	proc_exit(0); /* only get here if we got a sigterm, if so we don't want to be restarted so exit 0*/
 }
 
 
@@ -511,13 +411,13 @@ timescale_bgw_cluster_launcher_main(void)
  * in the first case, we have no vxid that we're waiting on. In the second case, we do, because we have to wait to see whether the txn that did the alter extension succeeded. So we wait for it to finish, then we a)
  * check to see whether the version of Timescale shown as installed in the catalogs is different from the version we populated in
  * our shared hash table, then if it is b) tell the old version's db_scheduler to shut down, ideally gracefully and it will cascade any
- * shutdown events to any workers it has started then c) start a new db_scheduler worker using the updated .so  .
+ * shutdown events to any workers it has started then c) morph into the new db_scheduler worker using the updated .so  .
  *
  * TODO: Make sure no race conditions if this is called multiple times when, say, upgrading or through the sql interface.
  */
 
 extern void
-timescale_bgw_db_scheduler_entrypoint(Oid db_id)
+tsbgw_db_scheduler_entrypoint(Oid db_id)
 {
 	bool		ts_installed = false;
 	char		version[MAX_VERSION_LEN];
@@ -579,55 +479,10 @@ timescale_bgw_db_scheduler_entrypoint(Oid db_id)
 }
 
 
-/*
- * kills old background workers for updates, and starts the entrypoint worker, passing in our current virtual transaction id so that we wait to
- * start the new scheduler until after the txn that may have changed the extension has either committed or aborted.
- * Called from a SQL interface inside of a transaction. We're already connected to a db and are either installing or updating the extension.
- */
-Datum
-timescale_bgw_restart_db_workers(PG_FUNCTION_ARGS)
-{
-	tsbgwMessage *message;
-	bool		success;
-
-	message = tsbgw_message_create(RESTART, MyDatabaseId);
-	success = tsbgw_message_send_and_wait(message);
-	PG_RETURN_BOOL(success);
-}
-Datum
-timescale_bgw_start_db_workers(PG_FUNCTION_ARGS)
-{
-	tsbgwMessage *message;
-	bool		success;
-
-	message = tsbgw_message_create(START, MyDatabaseId);
-	success = tsbgw_message_send_and_wait(message);
-	PG_RETURN_BOOL(success);
-}
-Datum
-timescale_bgw_stop_db_workers(PG_FUNCTION_ARGS)
-{
-	tsbgwMessage *message;
-	bool		success;
-
-	message = tsbgw_message_create(STOP, MyDatabaseId);
-	success = tsbgw_message_send_and_wait(message);
-	PG_RETURN_BOOL(success);
-}
 
 
-/* called by the loader when we intercept a drop database statement, must pass in oid rather than use MyDatabaseId*/
 extern void
-timescale_bgw_on_db_drop(Oid dropped_oid)
-{
-	tsbgwMessage *message;
-	bool		success;
-
-	message = tsbgw_message_create(STOP, dropped_oid);
-	success = tsbgw_message_send_and_wait(message);
-}
-extern void
-timescale_bgw_register_cluster_launcher(void)
+tsbgw_cluster_launcher_register(void)
 {
 	BackgroundWorker worker;
 
@@ -638,24 +493,19 @@ timescale_bgw_register_cluster_launcher(void)
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_restart_time = TSBGW_LAUNCHER_RESTART_TIME;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-	worker.bgw_notify_pid = 0;
-
+    worker.bgw_notify_pid = 0;
 	/*
 	 * TODO: Fix length things to make sure we don't go over BGW_MAXLEN for so
 	 * name
 	 */
 	sprintf(worker.bgw_library_name, EXTENSION_NAME);
-	sprintf(worker.bgw_function_name, "timescale_bgw_cluster_launcher_main");
-
+	sprintf(worker.bgw_function_name, "tsbgw_cluster_launcher_main");
 
 	RegisterBackgroundWorker(&worker);
 
 }
 
-/* this gets called by the loader (and therefore the postmaster) at shared_preload_libraries time*/
-extern void
-timescale_bgw_shmem_init(void)
-{
-	RequestAddinShmemSpace(sizeof(tsbgwSharedState));
 
-}
+
+
+

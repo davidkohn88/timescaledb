@@ -24,7 +24,7 @@ set(SOURCE_FILES
   size_utils.sql
   histogram.sql
   cache.sql
-  background_jobs.sql
+  bgw_scheduler.sql
 )
 
 # These files should be pre-pended to update scripts so that they are

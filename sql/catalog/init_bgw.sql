@@ -1,6 +1,6 @@
 CREATE FUNCTION _timescaledb_internal.start_background_workers()
 RETURNS VOID 
-AS '@LOADER_PATHNAME@', 'timescale_bgw_start_db_workers'
+AS '@LOADER_PATHNAME@', 'tsbgw_db_workers_start'
 LANGUAGE C VOLATILE;
 
 SELECT _timescaledb_internal.start_background_workers();

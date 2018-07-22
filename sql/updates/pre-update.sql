@@ -18,7 +18,7 @@ DROP TRIGGER IF EXISTS "0_cache_inval" ON _timescaledb_catalog.dimension;
 
 CREATE OR REPLACE FUNCTION _timescaledb_internal.restart_background_workers()
 RETURNS VOID 
-AS '@LOADER_PATHNAME@', 'timescale_bgw_restart_db_workers'
+AS '@LOADER_PATHNAME@', 'tsbgw_db_workers_restart'
 LANGUAGE C VOLATILE;
 
 SELECT _timescaledb_internal.restart_background_workers();

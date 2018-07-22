@@ -5,7 +5,7 @@ set(TEST_FILES
   append.sql
   append_unoptimized.sql
   append_x_diff.sql
-  background_worker.sql
+  bgw_scheduler.sql
   chunks.sql
   cluster.sql
   constraint.sql

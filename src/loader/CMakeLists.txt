@@ -1,13 +1,16 @@
 set(HEADERS
-  bgw_message_queue.h
-  timescale_bgw.h
-  timescale_bgw_internal.h
+  tsbgw_message_queue.h
+  tsbgw_counter.h
+  tsbgw_launcher.h
+  tsbgw_interface.h
 )
 
 set(SOURCES
-  bgw_message_queue.c
   loader.c
-  timescale_bgw.c)
+  tsbgw_message_queue.c
+  tsbgw_counter.c
+  tsbgw_launcher.c
+  tsbgw_interface.c)
 
 add_library(${PROJECT_NAME}-loader MODULE ${SOURCES} ${HEADERS})
 
