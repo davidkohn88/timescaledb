@@ -7,7 +7,7 @@
 #include <storage/procarray.h>
 #include <storage/shm_mq.h>
 
-#include "bgw_message_queue.h"
+#include "tsbgw_message_queue.h"
 
 #define TSBGW_MAX_MESSAGES 16
 #define TSBGW_MESSAGE_QUEUE_NAME "timescale_bgw_message_queue"
@@ -127,7 +127,7 @@ static tsbgwMessage * tsbgw_message_queue_remove(tsbgwMessageQueue * queue)
 }
 
 /*construct a message*/
-extern tsbgwMessage * tsbgw_message_create(tsbgwMessageType message_type, Oid db_oid)
+static tsbgwMessage * tsbgw_message_create(tsbgwMessageType message_type, Oid db_oid)
 {
 	tsbgwMessage *message = palloc(sizeof(tsbgwMessage));
 	dsm_segment *seg;
@@ -139,8 +139,7 @@ extern tsbgwMessage * tsbgw_message_create(tsbgwMessageType message_type, Oid db
 		.message_type = message_type,
 			.sender_pid = MyProcPid,
 			.db_oid = db_oid,
-			.ack_dsm_handle = dsm_segment_handle(seg),
-			.offset_to_shm_mq = 0
+			.ack_dsm_handle = dsm_segment_handle(seg)
 	};
 
 	return message;
@@ -151,7 +150,7 @@ extern tsbgwMessage * tsbgw_message_create(tsbgwMessageType message_type, Oid db
  * consumes message and deallocates
  */
 extern bool
-tsbgw_message_send_and_wait(tsbgwMessage * message)
+tsbgw_message_send_and_wait(tsbgwMessageType message_type, Oid db_oid)
 {
 	bool		send_result = false;
 	shm_mq	   *ack_queue;
@@ -160,6 +159,9 @@ tsbgw_message_send_and_wait(tsbgwMessage * message)
 	shm_mq_result receipt;
 	Size		bytes_received = 0;
 	bool	   *data;
+	tsbgwMessage *message;
+
+	message = tsbgw_message_create(message_type, db_oid);
 
 	seg = dsm_find_mapping(message->ack_dsm_handle);
 	ack_queue = shm_mq_create(dsm_segment_address(seg), TSBGW_ACK_QUEUE_SIZE);

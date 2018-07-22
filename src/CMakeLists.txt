@@ -35,7 +35,7 @@ endif (MSVC)
 endif (WIN32)
 
 set(HEADERS
-  background_jobs.h
+  bgw_scheduler.h
   cache.h
   catalog.h
   chunk_constraint.h
@@ -79,7 +79,7 @@ set(HEADERS
 
 set(SOURCES
   agg_bookend.c
-  background_jobs.c
+  bgw_scheduler.c
   cache.c
   cache_invalidate.c
   catalog.c

@@ -20,9 +20,9 @@
 /* for setting our wait event during waitlatch*/
 #include <pgstat.h>
 
-#include "timescale_bgw_internal.h"
-#include "timescale_bgw.h"
-#include "bgw_message_queue.h"
+#include "tsbgw_counter.h"
+#include "tsbgw_launcher.h"
+#include "tsbgw_message_queue.h"
 #define PG96 ((PG_VERSION_NUM >= 90600) && (PG_VERSION_NUM < 100000))
 #define PG10 ((PG_VERSION_NUM >= 100000) && (PG_VERSION_NUM < 110000))
 /*
@@ -211,7 +211,7 @@ post_analyze_hook(ParseState *pstate, Query *query)
 	if (query->commandType == CMD_UTILITY)
 	{
 		/*
-		* If we drop a database, we need to intercept and stop any of our workers
+		* If we drop a database, we need to intercept and stop any of our schedulers
 		* that might be connected to said db.
 		*/
 		if (IsA(query->utilityStmt, DropdbStmt))
@@ -222,14 +222,14 @@ post_analyze_hook(ParseState *pstate, Query *query)
 			if (dropped_db_oid != InvalidOid)
 			{
 				ereport(LOG, (errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
-				timescale_bgw_on_db_drop(dropped_db_oid);
+				tsbgw_message_send_and_wait(STOP, dropped_db_oid);
 			}
 			return;
 		}
 		else if (drop_statement_drops_extension((DropStmt *) query->utilityStmt))
-		/* if we drop the extension we should restart the worker (restart in case of rollbacks)*/
+		/* if we drop the extension we should restart (in case of a rollback) the scheduler*/
 		{
-			DirectFunctionCall1(timescale_bgw_restart_db_workers, Int8GetDatum(0));
+			tsbgw_message_send_and_wait(RESTART, MyDatabaseId);
 		}
 	}
 	if (!guc_disable_load &&
@@ -257,7 +257,7 @@ timescale_shmem_startup_hook(void)
 {
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
-	timescale_bgw_shmem_startup();
+	tsbgw_counter_shmem_startup();
 	tsbgw_message_queue_shmem_startup();
 }
 static void
@@ -279,9 +279,9 @@ _PG_init(void)
 
 	elog(INFO, "timescaledb loaded");
 
-	timescale_bgw_shmem_init();
+	tsbgw_counter_shmem_alloc();
 	tsbgw_message_queue_alloc();
-	timescale_bgw_register_cluster_launcher();
+	tsbgw_cluster_launcher_register();
 
 	/* This is a safety-valve variable to prevent loading the full extension */
 	DefineCustomBoolVariable(GUC_DISABLE_LOAD_NAME, "Disable the loading of the actual extension",

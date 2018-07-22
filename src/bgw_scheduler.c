@@ -22,7 +22,7 @@
 #include <pgstat.h>
 #include "extension.h"
 
-#include "background_jobs.h"
+#include "bgw_scheduler.h"
 
 
 
@@ -50,10 +50,10 @@ timescale_bgw_sigterm(SIGNAL_ARGS)
 
 
 extern Datum
-timescale_bgw_db_scheduler_main(PG_FUNCTION_ARGS)
+tsbgw_db_scheduler_main(PG_FUNCTION_ARGS)
 {
 	int			num_wakes = 0;
-	PGFunction	get_total_workers = load_external_function("timescaledb", "timescale_bgw_get_total_workers", false, NULL);
+	PGFunction	get_unreserved = load_external_function("timescaledb", "tsbgw_num_unreserved", false, NULL);
 
 	BackgroundWorkerBlockSignals();
 	pqsignal(SIGTERM, timescale_bgw_sigterm);	/* now set up our own signal
@@ -75,7 +75,7 @@ timescale_bgw_db_scheduler_main(PG_FUNCTION_ARGS)
 
 		CHECK_FOR_INTERRUPTS();
 		ereport(LOG, (errmsg("Database id = %d, Wake # %d ", MyDatabaseId, num_wakes)));
-		ereport(LOG, (errmsg("Total Workers = %d", DatumGetInt32(DirectFunctionCall1(get_total_workers, Int8GetDatum(0))))));
+		ereport(LOG, (errmsg("Total Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
 	}
 	ereport(LOG, (errmsg("Exiting db %d", MyDatabaseId)));
 	/* TODO: Kill children when they exist */
