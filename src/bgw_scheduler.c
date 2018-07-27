@@ -75,7 +75,7 @@ tsbgw_db_scheduler_main(PG_FUNCTION_ARGS)
 
 		CHECK_FOR_INTERRUPTS();
 		ereport(LOG, (errmsg("Database id = %d, Wake # %d ", MyDatabaseId, num_wakes)));
-		ereport(LOG, (errmsg("Total Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
+		ereport(LOG, (errmsg("Unrserved Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
 	}
 	ereport(LOG, (errmsg("Exiting db %d", MyDatabaseId)));
 	/* TODO: Kill children when they exist */

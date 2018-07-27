@@ -52,7 +52,7 @@ BEGIN;
 SELECT _timescaledb_internal.restart_background_workers();
  restart_background_workers 
 ----------------------------
- 
+ t
 (1 row)
 
 select pg_sleep(0.1);
@@ -97,7 +97,7 @@ AND datname = 'single_2';
 SELECT _timescaledb_internal.stop_background_workers();
  stop_background_workers 
 -------------------------
- 
+ t
 (1 row)
 
 SELECT * FROM worker_counts;
@@ -110,7 +110,7 @@ SELECT * FROM worker_counts;
 SELECT _timescaledb_internal.stop_background_workers();
  stop_background_workers 
 -------------------------
- 
+ t
 (1 row)
 
 SELECT * FROM worker_counts;
@@ -123,7 +123,7 @@ SELECT * FROM worker_counts;
 SELECT _timescaledb_internal.start_background_workers();
  start_background_workers 
 --------------------------
- 
+ t
 (1 row)
 
 select pg_sleep(0.1);
@@ -146,7 +146,7 @@ AND datname = 'single_2' \gset
 SELECT _timescaledb_internal.start_background_workers();
  start_background_workers 
 --------------------------
- 
+ t
 (1 row)
 
 select pg_sleep(0.1);
@@ -168,7 +168,7 @@ AND datname = 'single_2';
 SELECT _timescaledb_internal.stop_background_workers();
  stop_background_workers 
 -------------------------
- 
+ t
 (1 row)
 
 SELECT * FROM worker_counts;
@@ -180,7 +180,7 @@ SELECT * FROM worker_counts;
 SELECT _timescaledb_internal.restart_background_workers();
  restart_background_workers 
 ----------------------------
- 
+ t
 (1 row)
 
 select pg_sleep(0.1);
