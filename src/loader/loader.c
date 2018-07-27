@@ -205,31 +205,46 @@ load_utility_cmd(Node *utility_stmt)
 }
 
 static void
+stop_workers_on_db_drop(DropdbStmt *drop_db_statement)
+{
+	Oid			dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
+
+	if (dropped_db_oid != InvalidOid)
+	{
+		ereport(LOG, (errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
+		tsbgw_message_send_and_wait(STOP, dropped_db_oid);
+	}
+	return;
+}
+static void
 post_analyze_hook(ParseState *pstate, Query *query)
 {
 
 	if (query->commandType == CMD_UTILITY)
 	{
 		/*
-		* If we drop a database, we need to intercept and stop any of our schedulers
-		* that might be connected to said db.
-		*/
-		if (IsA(query->utilityStmt, DropdbStmt))
+		 * If we drop a database, we need to intercept and stop any of our
+		 * schedulers that might be connected to said db.
+		 */
+		switch (nodeTag(query->utilityStmt))
 		{
-			DropdbStmt *drop_db_statement = (DropdbStmt *) query->utilityStmt;
-			Oid			dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
+			case T_DropdbStmt:
+				stop_workers_on_db_drop((DropdbStmt *) query->utilityStmt);
+				break;
+			case T_DropStmt:
+				if (drop_statement_drops_extension((DropStmt *) query->utilityStmt))
 
-			if (dropped_db_oid != InvalidOid)
-			{
-				ereport(LOG, (errmsg("timescale bgw scheduler for db oid %d will be stopped", dropped_db_oid)));
-				tsbgw_message_send_and_wait(STOP, dropped_db_oid);
-			}
-			return;
-		}
-		else if (drop_statement_drops_extension((DropStmt *) query->utilityStmt))
-		/* if we drop the extension we should restart (in case of a rollback) the scheduler*/
-		{
-			tsbgw_message_send_and_wait(RESTART, MyDatabaseId);
+					/*
+					 * if we drop the extension we should restart (in case of
+					 * a rollback) the scheduler
+					 */
+				{
+					tsbgw_message_send_and_wait(RESTART, MyDatabaseId);
+				}
+				break;
+			default:
+
+				break;
 		}
 	}
 	if (!guc_disable_load &&

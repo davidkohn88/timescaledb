@@ -12,21 +12,22 @@
 Datum
 tsbgw_worker_reserve(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_BOOL(tsbgw_total_workers_increment(TSBGW_MAX_WORKERS_GUC_STANDIN));
+	PG_RETURN_BOOL(tsbgw_total_workers_increment());
 }
 Datum
 tsbgw_worker_release(PG_FUNCTION_ARGS)
 {
-    tsbgw_total_workers_decrement();
-    PG_RETURN_VOID();
+	tsbgw_total_workers_decrement();
+	PG_RETURN_VOID();
 }
 
 Datum
 tsbgw_num_unreserved(PG_FUNCTION_ARGS)
 {
-    int         unreserved_workers;
-    unreserved_workers = TSBGW_MAX_WORKERS_GUC_STANDIN - tsbgw_total_workers_get();
-    PG_RETURN_INT32(unreserved_workers);
+	int			unreserved_workers;
+
+	unreserved_workers = TSBGW_MAX_WORKERS_GUC_STANDIN - tsbgw_total_workers_get();
+	PG_RETURN_INT32(unreserved_workers);
 }
 
 Datum

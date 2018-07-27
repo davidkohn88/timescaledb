@@ -13,4 +13,4 @@ extern void tsbgw_db_scheduler_entrypoint(Oid db_id);
 
 
 
-#endif /*TSBGW_LAUNCHER_H*/
+#endif							/* TSBGW_LAUNCHER_H */

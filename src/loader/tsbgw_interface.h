@@ -19,4 +19,4 @@ PG_FUNCTION_INFO_V1(tsbgw_db_workers_restart);
 
 
 
-#endif /* TSBGW_INTERFACE_H*/
+#endif							/* TSBGW_INTERFACE_H */

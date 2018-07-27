@@ -14,16 +14,16 @@
 #define TSBGW_MQ_TRANCHE_NAME "timescale_bgw_mq_tranche"
 
 #define TSBGW_ACK_QUEUE_SIZE (MAXALIGN(shm_mq_minimum_size + sizeof(int)))
-typedef struct tsbgwMessageQueue
+typedef struct TsbgwMessageQueue
 {
 	pid_t		reader_pid;		/* should only be set once at cluster launcher
 								 * startup */
 	LWLock	   *lock;			/* pointer to the lock to control
 								 * adding/removing elements from queue */
-	int			read_upto;
-	int			num_elements;
-	tsbgwMessage buffer[TSBGW_MAX_MESSAGES];
-}			tsbgwMessageQueue;
+	uint			read_upto;
+	uint			num_elements;
+	TsbgwMessage buffer[TSBGW_MAX_MESSAGES];
+}			TsbgwMessageQueue;
 
 
 
@@ -33,9 +33,9 @@ typedef struct tsbgwMessageQueue
  * in the case where we do not find the shared memory segment we must initialize it. (it's also why we need the lock)
  */
 
-static tsbgwMessageQueue * tsbgw_message_queue_attach(bool possible_restart)
+static TsbgwMessageQueue * tsbgw_message_queue_attach(bool possible_restart)
 {
-	static tsbgwMessageQueue * tsbgw_mq = NULL;
+	static TsbgwMessageQueue * tsbgw_mq = NULL;
 	bool		found;
 
 	/* reset in case this is a restart within the postmaster */
@@ -44,10 +44,10 @@ static tsbgwMessageQueue * tsbgw_message_queue_attach(bool possible_restart)
 	if (tsbgw_mq == NULL)
 	{
 		LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-		tsbgw_mq = ShmemInitStruct(TSBGW_MESSAGE_QUEUE_NAME, sizeof(tsbgwMessageQueue), &found);
+		tsbgw_mq = ShmemInitStruct(TSBGW_MESSAGE_QUEUE_NAME, sizeof(TsbgwMessageQueue), &found);
 		if (!found)
 		{
-			memset(tsbgw_mq, 0, sizeof(tsbgwMessageQueue));
+			memset(tsbgw_mq, 0, sizeof(TsbgwMessageQueue));
 			tsbgw_mq->lock = &(GetNamedLWLockTranche(TSBGW_MQ_TRANCHE_NAME))->lock;
 		}
 		LWLockRelease(AddinShmemInitLock);
@@ -67,7 +67,7 @@ tsbgw_message_queue_shmem_startup(void)
 extern void
 tsbgw_message_queue_alloc(void)
 {
-	RequestAddinShmemSpace(sizeof(tsbgwMessageQueue));
+	RequestAddinShmemSpace(sizeof(TsbgwMessageQueue));
 	RequestNamedLWLockTranche(TSBGW_MQ_TRANCHE_NAME, 1);
 }
 
@@ -82,7 +82,7 @@ tsbgw_message_queue_alloc(void)
 
 /* Add a message to the queue - we can do this if the queue is not full */
 static bool
-tsbgw_message_queue_add(tsbgwMessageQueue * queue, tsbgwMessage * message)
+tsbgw_message_queue_add(TsbgwMessageQueue * queue, TsbgwMessage * message)
 {
 	bool		message_sent = false;
 	pid_t		reader_pid = 0;
@@ -90,7 +90,7 @@ tsbgw_message_queue_add(tsbgwMessageQueue * queue, tsbgwMessage * message)
 	LWLockAcquire(queue->lock, LW_EXCLUSIVE);
 	if (queue->num_elements < TSBGW_MAX_MESSAGES)
 	{
-		memcpy(&queue->buffer[(queue->read_upto + queue->num_elements) % TSBGW_MAX_MESSAGES], message, sizeof(tsbgwMessage));
+		memcpy(&queue->buffer[(queue->read_upto + queue->num_elements) % TSBGW_MAX_MESSAGES], message, sizeof(TsbgwMessage));
 		queue->num_elements++;
 		message_sent = true;
 		reader_pid = queue->reader_pid;
@@ -105,9 +105,9 @@ tsbgw_message_queue_add(tsbgwMessageQueue * queue, tsbgwMessage * message)
 	return message_sent;
 }
 
-static tsbgwMessage * tsbgw_message_queue_remove(tsbgwMessageQueue * queue)
+static TsbgwMessage * tsbgw_message_queue_remove(TsbgwMessageQueue * queue)
 {
-	tsbgwMessage *message = NULL;
+	TsbgwMessage *message = NULL;
 
 	LWLockAcquire(queue->lock, LW_EXCLUSIVE);
 	if (queue->reader_pid == 0)
@@ -117,8 +117,8 @@ static tsbgwMessage * tsbgw_message_queue_remove(tsbgwMessageQueue * queue)
 
 	if (queue->num_elements > 0)
 	{
-		message = palloc(sizeof(tsbgwMessage));
-		memcpy(message, &queue->buffer[queue->read_upto], sizeof(tsbgwMessage));
+		message = palloc(sizeof(TsbgwMessage));
+		memcpy(message, &queue->buffer[queue->read_upto], sizeof(TsbgwMessage));
 		queue->read_upto = (queue->read_upto + 1) % TSBGW_MAX_MESSAGES;
 		queue->num_elements--;
 	}
@@ -127,14 +127,14 @@ static tsbgwMessage * tsbgw_message_queue_remove(tsbgwMessageQueue * queue)
 }
 
 /*construct a message*/
-static tsbgwMessage * tsbgw_message_create(tsbgwMessageType message_type, Oid db_oid)
+static TsbgwMessage * tsbgw_message_create(TsbgwMessageType message_type, Oid db_oid)
 {
-	tsbgwMessage *message = palloc(sizeof(tsbgwMessage));
+	TsbgwMessage *message = palloc(sizeof(TsbgwMessage));
 	dsm_segment *seg;
 
 	seg = dsm_create(TSBGW_ACK_QUEUE_SIZE, 0);
 
-	*message = (tsbgwMessage)
+	*message = (TsbgwMessage)
 	{
 		.message_type = message_type,
 			.sender_pid = MyProcPid,
@@ -150,16 +150,15 @@ static tsbgwMessage * tsbgw_message_create(tsbgwMessageType message_type, Oid db
  * consumes message and deallocates
  */
 extern bool
-tsbgw_message_send_and_wait(tsbgwMessageType message_type, Oid db_oid)
+tsbgw_message_send_and_wait(TsbgwMessageType message_type, Oid db_oid)
 {
 	bool		send_result = false;
 	shm_mq	   *ack_queue;
 	dsm_segment *seg;
 	shm_mq_handle *ack_queue_handle;
-	shm_mq_result receipt;
 	Size		bytes_received = 0;
-	bool	   *data;
-	tsbgwMessage *message;
+	bool	   *data = NULL;
+	TsbgwMessage *message;
 
 	message = tsbgw_message_create(message_type, db_oid);
 
@@ -173,9 +172,8 @@ tsbgw_message_send_and_wait(tsbgwMessageType message_type, Oid db_oid)
 
 	if (send_result)
 	{
-		receipt = shm_mq_wait_for_attach(ack_queue_handle);
-		if (receipt == SHM_MQ_SUCCESS)
-			receipt = shm_mq_receive(ack_queue_handle, &bytes_received, (void **) &data, false);
+		shm_mq_wait_for_attach(ack_queue_handle);
+		shm_mq_receive(ack_queue_handle, &bytes_received, (void **) &data, false);
 		send_result = (bytes_received != 0) && *data;
 	}
 	dsm_detach(seg);			/* queue detach happens in dsm detach callback */
@@ -186,7 +184,7 @@ tsbgw_message_send_and_wait(tsbgwMessageType message_type, Oid db_oid)
 /*
  * called only by the launcher
  */
-extern tsbgwMessage * tsbgw_message_receive()
+extern TsbgwMessage * tsbgw_message_receive()
 {
 	return tsbgw_message_queue_remove(tsbgw_message_queue_attach(false));
 }
@@ -196,7 +194,7 @@ extern tsbgwMessage * tsbgw_message_receive()
  * consumes message and deallocates
  */
 extern void
-tsbgw_message_send_ack(tsbgwMessage * message, bool success)
+tsbgw_message_send_ack(TsbgwMessage * message, bool success)
 {
 	shm_mq	   *ack_queue;
 	dsm_segment *seg;

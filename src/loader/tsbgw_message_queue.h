@@ -5,29 +5,30 @@
 #include <storage/dsm.h>
 
 
-typedef enum tsbgwMessageType
+typedef enum TsbgwMessageType
 {
 	STOP = 0,
 	START,
-	RESTART
-}			tsbgwMessageType;
+	RESTART,
+	CLEAN_SHUTDOWN
+}			TsbgwMessageType;
 
-typedef struct tsbgwMessage
+typedef struct TsbgwMessage
 {
-	tsbgwMessageType message_type;
+	TsbgwMessageType message_type;
 
 	pid_t		sender_pid;
 	Oid			db_oid;
 	dsm_handle	ack_dsm_handle;
 
 
-}			tsbgwMessage;
+}			TsbgwMessage;
 
-extern bool tsbgw_message_send_and_wait(tsbgwMessageType message, Oid db_oid);
+extern bool tsbgw_message_send_and_wait(TsbgwMessageType message, Oid db_oid);
 
 /* called only by the launcher*/
-extern tsbgwMessage * tsbgw_message_receive(void);
-extern void tsbgw_message_send_ack(tsbgwMessage * message, bool success);
+extern TsbgwMessage * tsbgw_message_receive(void);
+extern void tsbgw_message_send_ack(TsbgwMessage * message, bool success);
 
 /*called at server startup*/
 extern void tsbgw_message_queue_alloc(void);
