@@ -9,8 +9,7 @@ typedef enum TsbgwMessageType
 {
 	STOP = 0,
 	START,
-	RESTART,
-	CLEAN_SHUTDOWN
+	RESTART
 }			TsbgwMessageType;
 
 typedef struct TsbgwMessage
@@ -27,6 +26,7 @@ typedef struct TsbgwMessage
 extern bool tsbgw_message_send_and_wait(TsbgwMessageType message, Oid db_oid);
 
 /* called only by the launcher*/
+extern void tsbgw_message_queue_set_reader(void);
 extern TsbgwMessage * tsbgw_message_receive(void);
 extern void tsbgw_message_send_ack(TsbgwMessage * message, bool success);
 
@@ -35,6 +35,7 @@ extern void tsbgw_message_queue_alloc(void);
 
 /*called in every backend during shmem startup hook*/
 extern void tsbgw_message_queue_shmem_startup(void);
+extern void tsbgw_message_queue_shmem_cleanup(void);
 
 
 #endif							/* BGW_MESSAGE_QUEUE_H */

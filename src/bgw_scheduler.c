@@ -22,31 +22,56 @@
 #include <pgstat.h>
 #include "extension.h"
 
+/* for dealing with signals*/
+#include <libpq/pqsignal.h>
 #include "bgw_scheduler.h"
 
 
-
-/* flags set by signal handlers */
-static volatile sig_atomic_t got_sighup = false;
-static volatile sig_atomic_t got_sigterm = false;
-
-
 /*
- * Signal handler for SIGTERM
- *		Set a flag to let the main loop to terminate, and set our latch to wake
- *		it up.
+ * NOTE:
+ * We will throw an error if we have gotten a sigterm due to the default signal handler for a bgworker (in bgworker.c)
+ * We don't block signals and set up our signal handler, because we would like this to be the default behavior.
+ * Instead of exiting at the end of our loop, this will pull us out of any waits or loops we happen to be in. We will also run our cleanup function
+ * set in the before_shmem_exit -> this is where we will terminate any child workers we have started.
+ * In the case of postmaster death, we run on_exit_reset (and should in any workers as well) and just get the hell out of there. Trying to communicate with other workers
+ * will now be impossible because the postmaster doesn't exist and it mediated that communication.
  */
-static void
-timescale_bgw_sigterm(SIGNAL_ARGS)
-{
-	int			save_errno = errno;
-
-	got_sigterm = true;
-	SetLatch(MyLatch);
-
-	errno = save_errno;
+static inline void tsbgw_on_postmaster_death(void){
+	on_exit_reset(); /* don't call exit hooks cause we want to bail out quickly */
+	ereport(FATAL,
+				(errcode(ERRCODE_ADMIN_SHUTDOWN),
+				errmsg("postmaster exited while timescale bgw was working")));
 }
 
+/*
+ * aliasing a few things in BgWorker.h so that we exit correctly on postmaster death so we don't have to duplicate code
+ * basically telling it we shouldn't call exit hooks cause we want to bail out quickly - similar to how
+ * the quickdie function works when we receive a sigquit. This should work similarly because postmaster death is a similar
+ * severity of issue.
+ */
+
+static inline BgwHandleStatus ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp){
+	BgwHandleStatus		status;
+	status = GetBackgroundWorkerPid(handle, pidp);
+	if (status == BGWH_POSTMASTER_DIED)
+		tsbgw_on_postmaster_death();
+	return status;
+
+}
+static inline BgwHandleStatus ts_WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pidp){
+	BgwHandleStatus		status;
+	status = WaitForBackgroundWorkerStartup(handle, pidp);
+	if (status == BGWH_POSTMASTER_DIED)
+		tsbgw_on_postmaster_death();
+	return status;
+}
+static inline BgwHandleStatus ts_WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle){
+	BgwHandleStatus		status;
+	status = WaitForBackgroundWorkerShutdown(handle);
+	if (status == BGWH_POSTMASTER_DIED)
+		tsbgw_on_postmaster_death();
+	return status;
+}
 
 
 extern Datum
@@ -55,30 +80,25 @@ tsbgw_db_scheduler_main(PG_FUNCTION_ARGS)
 	int			num_wakes = 0;
 	PGFunction	get_unreserved = load_external_function("timescaledb", "tsbgw_num_unreserved", false, NULL);
 
-	BackgroundWorkerBlockSignals();
-	pqsignal(SIGTERM, timescale_bgw_sigterm);	/* now set up our own signal
-												 * handler cause we know we've
-												 * been started correctly. */
-	BackgroundWorkerUnblockSignals();	/* unblock signals with default
-										 * handlers for now. */
+	/* TODO: SETUP BEFORE_SHMEM_EXIT_CALLBACK */
+
 	ereport(LOG, (errmsg("Versioned Worker started for Database id = %d with pid %d", MyDatabaseId, MyProcPid)));
 
-	while (!got_sigterm)
+	while (true)
 	{
 		int			wl_rc;
 
+		ereport(LOG, (errmsg("Database id = %d, Wake # %d ", MyDatabaseId, num_wakes)));
+		ereport(LOG, (errmsg("Unreserved Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
+		num_wakes++;
+
+
 		wl_rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, 5 * 1000L, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
-		num_wakes++;
-		if (wl_rc & WL_POSTMASTER_DEATH)
-			proc_exit(1);
 
+		if (wl_rc & WL_POSTMASTER_DEATH)
+			tsbgw_on_postmaster_death();
 		CHECK_FOR_INTERRUPTS();
-		ereport(LOG, (errmsg("Database id = %d, Wake # %d ", MyDatabaseId, num_wakes)));
-		ereport(LOG, (errmsg("Unrserved Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
 	}
-	ereport(LOG, (errmsg("Exiting db %d", MyDatabaseId)));
-	/* TODO: Kill children when they exist */
-	proc_exit(0);
 
 };
