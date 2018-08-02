@@ -10,8 +10,7 @@
 #include <storage/proc.h>
 #include <storage/shmem.h>
 
-
-
+#include <storage/ipc.h> /* for setting proc_exit callbacks*/
 
 /* for setting our wait event during waitlatch*/
 #include <pgstat.h>
@@ -37,6 +36,7 @@
 #define TSBGW_DB_SCHEDULER_FUNCNAME "tsbgw_db_scheduler_main"
 #define TSBGW_ENTRYPOINT_FUNCNAME "tsbgw_db_scheduler_entrypoint"
 #define TSBGW_LAUNCHER_RESTART_TIME 10
+
 /*
  * Main bgw launcher for the cluster. Run through the timescale loader, so needs to have a
  * small footprint as any interactions it has will need to remain backwards compatible for
@@ -51,6 +51,7 @@
 
 static volatile sig_atomic_t got_sigterm = false;	/* for signal handler for
 													 * launcher */
+static volatile sig_atomic_t got_sigint = false;
 
 typedef struct TsbgwHashEntry
 {
@@ -60,6 +61,66 @@ typedef struct TsbgwHashEntry
 }			TsbgwHashEntry;
 
 
+/*
+ * aliasing a few things in bgWorker.h so that we exit correctly on postmaster death so we don't have to duplicate code
+ * basically telling it we shouldn't call exit hooks cause we want to bail out quickly - similar to how
+ * the quickdie function works when we receive a sigquit. This should work similarly because postmaster death is a similar
+ * severity of issue.
+ * Additionally, we're wrapping these calls to make sure we never have a NULL handle, if we have a null handle, we return  normal things.
+ * I have left the capitalization in their format to make clear the relationship to the functions in bgworker.h and that
+ * these are just passthroughs and should maintain the same behavior unless BGWH_POSTMASTER_DIED is returned.
+ */
+
+static inline void tsbgw_on_postmaster_death(void){
+	on_exit_reset(); /* don't call exit hooks cause we want to bail out quickly */
+	ereport(FATAL,
+				(errcode(ERRCODE_ADMIN_SHUTDOWN),
+				errmsg("postmaster exited while timescale bgw was working")));
+}
+static inline BgwHandleStatus ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp){
+	BgwHandleStatus		status;
+
+	if (handle == NULL)
+		status = BGWH_STOPPED;
+	else
+		status = GetBackgroundWorkerPid(handle, pidp);
+
+	if (status == BGWH_POSTMASTER_DIED)
+		tsbgw_on_postmaster_death();
+	return status;
+
+}
+static inline BgwHandleStatus ts_WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pidp){
+	BgwHandleStatus		status;
+
+	if (handle == NULL)
+		status = BGWH_STOPPED;
+	else
+		status = WaitForBackgroundWorkerStartup(handle, pidp);
+
+	if (status == BGWH_POSTMASTER_DIED)
+		tsbgw_on_postmaster_death();
+	return status;
+}
+static inline BgwHandleStatus ts_WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle){
+	BgwHandleStatus		status;
+
+	if (handle == NULL)
+		status = BGWH_STOPPED;
+	else
+		status = WaitForBackgroundWorkerShutdown(handle);
+
+	if (status == BGWH_POSTMASTER_DIED)
+		tsbgw_on_postmaster_death();
+	return status;
+}
+
+static inline void ts_TerminateBackgroundWorker(BackgroundWorkerHandle *handle){
+	if (handle == NULL)
+		return;
+	else
+		return TerminateBackgroundWorker(handle);
+}
 extern void
 tsbgw_cluster_launcher_register(void)
 {
@@ -176,6 +237,8 @@ populate_database_htab(void)
 	return db_htab;
 }
 
+
+
 /*
  * We want to avoid the race condition where we have enough workers allocated to start schedulers
  * for all databases, but before we could get all of them started, the (say) first scheduler has
@@ -188,6 +251,7 @@ start_db_schedulers(HTAB *db_htab)
 {
 	HASH_SEQ_STATUS hash_seq;
 	TsbgwHashEntry *current_entry;
+
 
 	/* now scan our hash table of dbs and register a worker for each */
 	hash_seq_init(&hash_seq, db_htab);
@@ -205,7 +269,7 @@ start_db_schedulers(HTAB *db_htab)
 		worker_registered = register_tsbgw_entrypoint_for_db(current_entry->db_oid, vxid, &current_entry->db_scheduler_handle);
 		if (worker_registered)
 		{
-			WaitForBackgroundWorkerStartup(current_entry->db_scheduler_handle, &worker_pid);
+			ts_WaitForBackgroundWorkerStartup(current_entry->db_scheduler_handle, &worker_pid);
 			ereport(LOG, (errmsg("Worker started with PID %d", worker_pid)));
 		}
 		else
@@ -215,36 +279,51 @@ start_db_schedulers(HTAB *db_htab)
 	}
 }
 
+/* this is called when we're going to shut down so we don't leave things messy
+* we*/
 static void
-stop_all_db_schedulers(HTAB *db_htab)
+launcher_pre_shmem_cleanup(int code, Datum arg)
 {
+	HTAB 		*db_htab = (HTAB *) DatumGetPointer(arg);
 	HASH_SEQ_STATUS hash_seq;
 	TsbgwHashEntry *current_entry;
 
 	hash_seq_init(&hash_seq, db_htab);
 	/* stop everyone */
-	while ((current_entry = hash_seq_search(&hash_seq)) != NULL)
-	{
-		TerminateBackgroundWorker(current_entry->db_scheduler_handle);
-	}
-	/* make sure they've stopped */
-	hash_seq_init(&hash_seq, db_htab);
-	while ((current_entry = hash_seq_search(&hash_seq)) != NULL)
-	{
-		BgwHandleStatus worker_status;
+	while ((current_entry = hash_seq_search(&hash_seq)) != NULL )
+		ts_TerminateBackgroundWorker(current_entry->db_scheduler_handle);
 
-		worker_status = WaitForBackgroundWorkerShutdown(current_entry->db_scheduler_handle);
-		if (worker_status == BGWH_POSTMASTER_DIED)	/* bailout */
-		{
-			proc_exit(1);
-		}
-		tsbgw_total_workers_decrement();
-	}
 	hash_destroy(db_htab);
+	/*must reinitialize shared memory structs if we want to restart*/
+	tsbgw_message_queue_shmem_cleanup();
+	tsbgw_counter_shmem_cleanup();
+}
+
+
+/*Garbage collector cleaning up any stopped schedulers*/
+static void
+stopped_db_schedulers_cleanup(HTAB *db_htab)
+{
+	HASH_SEQ_STATUS hash_seq;
+	TsbgwHashEntry *current_entry;
+	bool		found;
+
+	hash_seq_init(&hash_seq, db_htab);
+
+	while ((current_entry = hash_seq_search(&hash_seq)) != NULL)
+	{
+		pid_t		worker_pid;
+
+		if (ts_GetBackgroundWorkerPid(current_entry->db_scheduler_handle, &worker_pid) == BGWH_STOPPED)
+		{
+			hash_search(db_htab, &current_entry->db_oid, HASH_REMOVE, &found);
+			tsbgw_total_workers_decrement();
+		}
+	}
+
 }
 
 /* actions for message types we could receive off of the tsbgw_message_queue*/
-
 static void
 message_start_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransactionId vxid)
 {
@@ -259,13 +338,15 @@ message_start_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransactionId
 	 * this should be idempotent, so if we find the background worker and it's
 	 * not stopped, we should just continue
 	 */
-	if (!found || GetBackgroundWorkerPid(tsbgw_he->db_scheduler_handle, &worker_pid) == BGWH_STOPPED)
+
+	if (!found || ts_GetBackgroundWorkerPid(tsbgw_he->db_scheduler_handle, &worker_pid) == BGWH_STOPPED)
 	{
 		pid_t		worker_pid;
 
 		if (!tsbgw_total_workers_increment())
 		{
 			ereport(LOG, (errmsg("timescale background worker could not be started consider increasing TSBGW_MAX_WORKERS_GUC_STANDIN")));
+			hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
 			tsbgw_message_send_ack(message, false);
 			return;
 		}
@@ -273,13 +354,12 @@ message_start_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransactionId
 		if (!worker_registered)
 		{
 			ereport(LOG, (errmsg("timescale background worker could not be started")));
-			tsbgw_total_workers_decrement();	/* couldn't register the
-												 * worker, decrement and
-												 * return false */
+			tsbgw_total_workers_decrement();
+			hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
 			tsbgw_message_send_ack(message, false);
 			return;
 		}
-		WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
+		ts_WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
 	}
 	tsbgw_message_send_ack(message, true);
 	return;
@@ -291,14 +371,14 @@ message_stop_action(HTAB *db_htab, TsbgwMessage * message)
 	TsbgwHashEntry *tsbgw_he;
 	bool		found;
 
-	tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
+	tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_FIND, &found);
 	if (found)
 	{
-		TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
-		WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
-		tsbgw_total_workers_decrement();
+		ts_TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
+		ts_WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
 	}
 	tsbgw_message_send_ack(message, true);
+	stopped_db_schedulers_cleanup(db_htab);
 	return;
 }
 
@@ -319,8 +399,8 @@ message_restart_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransaction
 	tsbgw_he = hash_search(db_htab, &message->db_oid, HASH_ENTER, &found);
 	if (found)
 	{
-		TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
-		WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
+		ts_TerminateBackgroundWorker(tsbgw_he->db_scheduler_handle);
+		ts_WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
 	}
 	else if (!tsbgw_total_workers_increment())	/* we still need to increment
 												 * if we haven't found an
@@ -336,48 +416,15 @@ message_restart_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransaction
 		ereport(LOG, (errmsg("timescale background worker could not be started")));
 		tsbgw_total_workers_decrement();	/* couldn't register the worker,
 											 * decrement and return false */
+		hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
 		tsbgw_message_send_ack(message, false);
 		return;
 	}
-	WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
+	ts_WaitForBackgroundWorkerStartup(tsbgw_he->db_scheduler_handle, &worker_pid);
 	tsbgw_message_send_ack(message, true);
 	return;
 }
 
-/*
- * This message should only be sent by a scheduler for a given database telling us it is about to cleanly shutdown
- * (when we discover that Timescale is not installed in the db). It should first send us this message,
- * we then send an ack (so it wakes up) and it should then immediately shut down so as not to keep us waiting.
- */
-static void
-message_clean_shutdown_action(HTAB *db_htab, TsbgwMessage * message)
-{
-	TsbgwHashEntry *tsbgw_he;
-	bool		found;
-	pid_t		worker_pid;
-	Oid			db_oid = message->db_oid;
-
-	tsbgw_he = hash_search(db_htab, &db_oid, HASH_FIND, &found);
-	if (found)
-	{
-		GetBackgroundWorkerPid(tsbgw_he->db_scheduler_handle, &worker_pid);
-		if (worker_pid != message->sender_pid)
-		{
-			ereport(LOG, (errmsg("tsbgw launcher received clean shutdown message from non-schedluer pid")));
-			tsbgw_message_send_ack(message, false);
-			return;
-		}
-
-		tsbgw_message_send_ack(message, true);	/* it is the worker's
-												 * responsibility to now
-												 * shutdown. So we can now
-												 * just wait for shutdown. */
-		WaitForBackgroundWorkerShutdown(tsbgw_he->db_scheduler_handle);
-		hash_search(db_htab, &db_oid, HASH_REMOVE, &found);
-		tsbgw_total_workers_decrement();
-	}
-	return;
-}
 
 /*
  * Drain queue, handle each message synchronously.
@@ -413,9 +460,6 @@ launcher_handle_messages(HTAB *db_htab)
 			case RESTART:
 				message_restart_action(db_htab, message, vxid);
 				break;
-			case CLEAN_SHUTDOWN:
-				message_clean_shutdown_action(db_htab, message);
-				break;
 		}
 
 	}
@@ -431,6 +475,18 @@ tsbgw_sigterm(SIGNAL_ARGS)
 
 	errno = save_errno;
 }
+
+
+static void
+tsbgw_sigint(SIGNAL_ARGS)
+{
+	int			save_errno = errno;
+
+	got_sigint = true;
+	SetLatch(MyLatch);
+
+	errno = save_errno;
+}
 extern void
 tsbgw_cluster_launcher_main(void)
 {
@@ -439,7 +495,10 @@ tsbgw_cluster_launcher_main(void)
 	HTAB	   *db_htab;
 
 	pqsignal(SIGTERM, tsbgw_sigterm);
+	pqsignal(SIGINT, tsbgw_sigint);
+
 	BackgroundWorkerUnblockSignals();
+
 	if (!tsbgw_total_workers_increment())
 	{
 		/*
@@ -452,7 +511,9 @@ tsbgw_cluster_launcher_main(void)
 	/* Connect to the db, no db name yet, so can only access shared catalogs */
 	BackgroundWorkerInitializeConnection(NULL, NULL);
 	pgstat_report_appname("Timescale BGW Cluster Launcher");
+	tsbgw_message_queue_set_reader();
 	db_htab = populate_database_htab();
+	before_shmem_exit(launcher_pre_shmem_cleanup, (Datum) db_htab);
 
 	for (n = 1; n <= hash_get_num_entries(db_htab); n++)
 	{
@@ -466,21 +527,24 @@ tsbgw_cluster_launcher_main(void)
 	start_db_schedulers(db_htab);
 
 
-	while (!got_sigterm)
+	while (!got_sigterm && !got_sigint)
 	{
 		int			wl_rc;
 
+		stopped_db_schedulers_cleanup(db_htab);
 		launcher_handle_messages(db_htab);
 
 		wl_rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_POSTMASTER_DEATH, 0, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 		if (wl_rc & WL_POSTMASTER_DEATH)
-			proc_exit(1);		/* bailout */
+			tsbgw_on_postmaster_death();
 		CHECK_FOR_INTERRUPTS();
 	}
-	stop_all_db_schedulers(db_htab);
-	proc_exit(0);				/* only get here if we got a sigterm, if so we
-								 * don't want to be restarted so exit 0 */
+	/* exit 0 on sigterm (no restart for hard fail) exit 1 on sigint (so we get restarted)*/
+	if (got_sigterm)
+		proc_exit(0);
+	else if (got_sigint)
+		proc_exit(1);
 }
 
 
@@ -553,7 +617,6 @@ tsbgw_db_scheduler_entrypoint(Oid db_id)
 		}
 
 	}
-	tsbgw_message_send_and_wait(CLEAN_SHUTDOWN, MyDatabaseId);
 	proc_exit(0);
 
 }
