@@ -8,10 +8,13 @@
 #include <storage/shmem.h>
 #include <storage/ipc.h>
 #include <storage/latch.h>
+#include <utils/guc.h>
 
 #include "tsbgw_counter.h"
 
 #define TSBGW_COUNTER_STATE_NAME "tsbgw_counter_state"
+
+int guc_max_bgw_processes = 8;
 /*
  * We need a bit of shared state here to deal with keeping track of
  * the total number of background workers we've launched across the instance
@@ -45,6 +48,22 @@ static void tsbgw_counter_state_init(bool reinit)
 	LWLockRelease(AddinShmemInitLock);
 }
 
+extern void tsbgw_counter_setup_gucs(void){
+
+	DefineCustomIntVariable("timescaledb.max_bgw_processes",
+							"Maximum background worker processes allocated to TimescaleDB",
+							"Max background worker processes allocated to TimescaleDB - set to at least 1 + number of databases in Postgres instance to use background workers ",
+							&guc_max_bgw_processes,
+							guc_max_bgw_processes,
+							0,
+							max_worker_processes,
+							PGC_SUSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+}
+
 /* this gets called by the loader (and therefore the postmaster) at shared_preload_libraries time*/
 extern void
 tsbgw_counter_shmem_alloc(void)
@@ -66,7 +85,7 @@ extern bool
 tsbgw_total_workers_increment()
 {
 	bool		incremented = false;
-	int			max_workers = TSBGW_MAX_WORKERS_GUC_STANDIN;
+	int			max_workers = guc_max_bgw_processes;
 
 	SpinLockAcquire(&tsbgw_ct->mutex);
 	if (tsbgw_ct->total_workers < max_workers)	/* result can be <= max_workers,

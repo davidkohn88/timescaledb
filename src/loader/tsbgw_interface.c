@@ -26,7 +26,7 @@ tsbgw_num_unreserved(PG_FUNCTION_ARGS)
 {
 	int			unreserved_workers;
 
-	unreserved_workers = TSBGW_MAX_WORKERS_GUC_STANDIN - tsbgw_total_workers_get();
+	unreserved_workers = guc_max_bgw_processes - tsbgw_total_workers_get();
 	PG_RETURN_INT32(unreserved_workers);
 }
 

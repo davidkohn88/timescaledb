@@ -297,6 +297,7 @@ _PG_init(void)
 	tsbgw_counter_shmem_alloc();
 	tsbgw_message_queue_alloc();
 	tsbgw_cluster_launcher_register();
+	tsbgw_counter_setup_gucs();
 
 	/* This is a safety-valve variable to prevent loading the full extension */
 	DefineCustomBoolVariable(GUC_DISABLE_LOAD_NAME, "Disable the loading of the actual extension",

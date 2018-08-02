@@ -35,7 +35,14 @@
 
 #define TSBGW_DB_SCHEDULER_FUNCNAME "tsbgw_db_scheduler_main"
 #define TSBGW_ENTRYPOINT_FUNCNAME "tsbgw_db_scheduler_entrypoint"
+
+#ifdef DEBUG
 #define TSBGW_LAUNCHER_RESTART_TIME 10
+#else
+#define TSBGW_LAUNCHER_RESTART_TIME 0
+#endif
+
+
 
 /*
  * Main bgw launcher for the cluster. Run through the timescale loader, so needs to have a
@@ -49,9 +56,6 @@
  * shared_preload_libraries time.
  */
 
-static volatile sig_atomic_t got_sigterm = false;	/* for signal handler for
-													 * launcher */
-static volatile sig_atomic_t got_sigint = false;
 
 typedef struct TsbgwHashEntry
 {
@@ -126,7 +130,6 @@ tsbgw_cluster_launcher_register(void)
 {
 	BackgroundWorker worker;
 
-	ereport(LOG, (errmsg("Registering Timescale BGW Launcher")));
 
 	/* set up worker settings for our main worker */
 	snprintf(worker.bgw_name, BGW_MAXLEN, "Timescale BGW Cluster Launcher");
@@ -146,13 +149,15 @@ tsbgw_cluster_launcher_register(void)
 
 }
 
+
+
 /*
  * Register a background worker that calls the main timescaledb library (ie loader) and uses the scheduler entrypoint function
  * the scheduler entrypoint will deal with starting a new worker, and waiting on any txns that it needs to, if we pass along a vxid in the bgw_extra field of the BgWorker
  *
  */
 static bool
-register_tsbgw_entrypoint_for_db(Oid db_id, VirtualTransactionId vxid, BackgroundWorkerHandle **handle)
+register_entrypoint_for_db(Oid db_id, VirtualTransactionId vxid, BackgroundWorkerHandle **handle)
 {
 
 	BackgroundWorker worker;
@@ -266,7 +271,7 @@ start_db_schedulers(HTAB *db_htab)
 		/* When called at server start, no need to wait on a vxid */
 		SetInvalidVirtualTransactionId(vxid);
 
-		worker_registered = register_tsbgw_entrypoint_for_db(current_entry->db_oid, vxid, &current_entry->db_scheduler_handle);
+		worker_registered = register_entrypoint_for_db(current_entry->db_oid, vxid, &current_entry->db_scheduler_handle);
 		if (worker_registered)
 		{
 			ts_WaitForBackgroundWorkerStartup(current_entry->db_scheduler_handle, &worker_pid);
@@ -345,12 +350,12 @@ message_start_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransactionId
 
 		if (!tsbgw_total_workers_increment())
 		{
-			ereport(LOG, (errmsg("timescale background worker could not be started consider increasing TSBGW_MAX_WORKERS_GUC_STANDIN")));
+			ereport(LOG, (errmsg("timescale background worker could not be started consider increasing timescaledb.max_bgw_processes")));
 			hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
 			tsbgw_message_send_ack(message, false);
 			return;
 		}
-		worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
+		worker_registered = register_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
 		if (!worker_registered)
 		{
 			ereport(LOG, (errmsg("timescale background worker could not be started")));
@@ -406,11 +411,11 @@ message_restart_action(HTAB *db_htab, TsbgwMessage * message, VirtualTransaction
 												 * if we haven't found an
 												 * entry */
 	{
-		ereport(LOG, (errmsg("timescale background worker could not be started consider increasing TSBGW_MAX_WORKERS_GUC_STANDIN")));
+		ereport(LOG, (errmsg("timescale background worker could not be started consider increasing timescaledb.max_bgw_processes")));
 		tsbgw_message_send_ack(message, false);
 		return;
 	}
-	worker_registered = register_tsbgw_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
+	worker_registered = register_entrypoint_for_db(tsbgw_he->db_oid, vxid, &tsbgw_he->db_scheduler_handle);
 	if (!worker_registered)
 	{
 		ereport(LOG, (errmsg("timescale background worker could not be started")));
@@ -465,37 +470,28 @@ launcher_handle_messages(HTAB *db_htab)
 	}
 }
 
+
 static void
 tsbgw_sigterm(SIGNAL_ARGS)
 {
-	int			save_errno = errno;
-
-	got_sigterm = true;
-	SetLatch(MyLatch);
-
-	errno = save_errno;
+	ereport(LOG,(errmsg("timescaledb launcher terminated by administrator command. Launcher will not restart after exiting.")));
+	proc_exit(0);
 }
 
-
-static void
-tsbgw_sigint(SIGNAL_ARGS)
-{
-	int			save_errno = errno;
-
-	got_sigint = true;
-	SetLatch(MyLatch);
-
-	errno = save_errno;
+extern void tsbgw_launcher_on_max_workers_guc_change(void){
+	if (guc_max_bgw_processes < tsbgw_total_workers_get())
+		ereport(ERROR, (errmsg("too many workers currently running, timescaledb launcher restarting")));
 }
+
 extern void
 tsbgw_cluster_launcher_main(void)
 {
 
 	int			n;
 	HTAB	   *db_htab;
+	int			num_unreserved_workers;
 
 	pqsignal(SIGTERM, tsbgw_sigterm);
-	pqsignal(SIGINT, tsbgw_sigint);
 
 	BackgroundWorkerUnblockSignals();
 
@@ -505,7 +501,7 @@ tsbgw_cluster_launcher_main(void)
 		 * should be the first thing happening so if we already exceeded our
 		 * limits it means we have a limit of 0 and we should just exit
 		 */
-		ereport(LOG, (errmsg("Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.", TSBGW_MAX_WORKERS_GUC_STANDIN)));
+		ereport(LOG, (errmsg("timescale background worker limit set to %d. please set higher if you would like to use background workers.", guc_max_bgw_processes)));
 		proc_exit(0);
 	}
 	/* Connect to the db, no db name yet, so can only access shared catalogs */
@@ -515,19 +511,18 @@ tsbgw_cluster_launcher_main(void)
 	db_htab = populate_database_htab();
 	before_shmem_exit(launcher_pre_shmem_cleanup, (Datum) db_htab);
 
-	for (n = 1; n <= hash_get_num_entries(db_htab); n++)
-	{
-		if (!tsbgw_total_workers_increment())
-		{
-			ereport(LOG, (errmsg("Total databases = %ld Timescale Background Worker Limit Set To %d. Please set higher if you would like to use Background Workers.", hash_get_num_entries(db_htab), TSBGW_MAX_WORKERS_GUC_STANDIN)));
-			proc_exit(0);
-		}
+	num_unreserved_workers = guc_max_bgw_processes - tsbgw_total_workers_get();
+	if (num_unreserved_workers < hash_get_num_entries(db_htab))
+		ereport(LOG, (errmsg("total databases = %ld timescale background worker limit set to %d. ", hash_get_num_entries(db_htab), guc_max_bgw_processes),
+							errhint("you may start background workers manually by using the  _timescaledb_internal.start_background_workers() function in each database you would like to have a scheduler worker in.")));
+	else {
+		for (n = 1; n <= hash_get_num_entries(db_htab); n++)
+			tsbgw_total_workers_increment();
+		start_db_schedulers(db_htab);
 	}
 
-	start_db_schedulers(db_htab);
 
-
-	while (!got_sigterm && !got_sigint)
+	while (true)
 	{
 		int			wl_rc;
 
@@ -540,11 +535,7 @@ tsbgw_cluster_launcher_main(void)
 			tsbgw_on_postmaster_death();
 		CHECK_FOR_INTERRUPTS();
 	}
-	/* exit 0 on sigterm (no restart for hard fail) exit 1 on sigint (so we get restarted)*/
-	if (got_sigterm)
-		proc_exit(0);
-	else if (got_sigint)
-		proc_exit(1);
+
 }
 
 
@@ -567,9 +558,7 @@ tsbgw_db_scheduler_entrypoint(Oid db_id)
 	/* unblock signals and use default signal handlers */
 	BackgroundWorkerUnblockSignals();
 
-	ereport(LOG, (errmsg("Worker started for Database id = %d with pid %d", db_id, MyProcPid)));
 	BackgroundWorkerInitializeConnectionByOid(db_id, InvalidOid);
-	ereport(LOG, (errmsg("Connected to db %d", db_id)));
 	pgstat_report_appname(MyBgworkerEntry->bgw_name);
 
 	/*
@@ -609,12 +598,9 @@ tsbgw_db_scheduler_entrypoint(Oid db_id)
 		snprintf(soname, MAX_SO_NAME_LEN, "%s-%s", EXTENSION_NAME, version);
 		versioned_scheduler_main_loop = load_external_function(soname, TSBGW_DB_SCHEDULER_FUNCNAME, false, NULL);
 		if (versioned_scheduler_main_loop == NULL)
-			ereport(LOG, (errmsg("Version %s does not have a background worker, exiting.", soname)));
-		else
-		{
-			/* essentially we morph into the versioned worker here */
+			ereport(LOG, (errmsg("version %s does not have a background worker, exiting.", soname)));
+		else /* essentially we morph into the versioned worker here */
 			DirectFunctionCall1(versioned_scheduler_main_loop, InvalidOid);
-		}
 
 	}
 	proc_exit(0);
