@@ -83,26 +83,28 @@ WHERE application_name = 'Timescale BGW Scheduler Entrypoint'
 AND datname = 'single_2' \gset
 
 SELECT _timescaledb_internal.start_background_workers();
-
+/*Here we're waiting to see if something shows up in pg_stat_activity, 
+ * so we have to condition our loop in the opposite way. We'll only wait 
+ * half a second in total as well so that tests don't take too long. */ 
 CREATE FUNCTION wait_equals(TIMESTAMPTZ) RETURNS BOOLEAN LANGUAGE PLPGSQL AS
 $BODY$
 DECLARE
 r BOOLEAN;
 BEGIN
-FOR i in 1..10
+FOR i in 1..5
 LOOP
 SELECT (backend_start = $1::timestamptz) backend_start_unchanged
 FROM pg_stat_activity
 WHERE application_name = 'Timescale BGW Scheduler Entrypoint'
 AND datname = 'single_2' into r;
-if(NOT r) THEN
+if(r) THEN
   PERFORM pg_sleep(0.1);
   PERFORM pg_stat_clear_snapshot();
 ELSE
-  RETURN TRUE;
+  RETURN FALSE;
 END IF;
 END LOOP;
-RETURN FALSE;
+RETURN TRUE;
 END
 $BODY$;
 select wait_equals(:'orig_backend_start');
