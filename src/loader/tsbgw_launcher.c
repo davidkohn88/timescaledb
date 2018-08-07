@@ -37,9 +37,9 @@
 #define TSBGW_ENTRYPOINT_FUNCNAME "tsbgw_db_scheduler_entrypoint"
 
 #ifdef DEBUG
-#define TSBGW_LAUNCHER_RESTART_TIME 10
-#else
 #define TSBGW_LAUNCHER_RESTART_TIME 0
+#else
+#define TSBGW_LAUNCHER_RESTART_TIME 10
 #endif
 
 
@@ -79,7 +79,7 @@ static inline void tsbgw_on_postmaster_death(void){
 	on_exit_reset(); /* don't call exit hooks cause we want to bail out quickly */
 	ereport(FATAL,
 				(errcode(ERRCODE_ADMIN_SHUTDOWN),
-				errmsg("postmaster exited while timescale bgw was working")));
+				errmsg("postmaster exited while pg_sleep(0.1) was working")));
 }
 static inline BgwHandleStatus ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp){
 	BgwHandleStatus		status;
@@ -275,7 +275,6 @@ start_db_schedulers(HTAB *db_htab)
 		if (worker_registered)
 		{
 			ts_WaitForBackgroundWorkerStartup(current_entry->db_scheduler_handle, &worker_pid);
-			ereport(LOG, (errmsg("Worker started with PID %d", worker_pid)));
 		}
 		else
 			break;				/* should we complain? */
@@ -478,9 +477,9 @@ tsbgw_sigterm(SIGNAL_ARGS)
 	proc_exit(0);
 }
 
-extern void tsbgw_launcher_on_max_workers_guc_change(void){
-	if (guc_max_bgw_processes < tsbgw_total_workers_get())
-		ereport(ERROR, (errmsg("too many workers currently running, timescaledb launcher restarting")));
+static void tsbgw_sigint(SIGNAL_ARGS)
+{
+	ereport(ERROR, (errmsg("timescaledb launcher canceled by administrator command. Launcher will restart after exiting")));
 }
 
 extern void
@@ -507,6 +506,8 @@ tsbgw_cluster_launcher_main(void)
 	/* Connect to the db, no db name yet, so can only access shared catalogs */
 	BackgroundWorkerInitializeConnection(NULL, NULL);
 	pgstat_report_appname("Timescale BGW Cluster Launcher");
+	ereport(LOG, (errmsg("timesacle bgw cluster launcher started")));
+
 	tsbgw_message_queue_set_reader();
 	db_htab = populate_database_htab();
 	before_shmem_exit(launcher_pre_shmem_cleanup, (Datum) db_htab);
@@ -521,6 +522,7 @@ tsbgw_cluster_launcher_main(void)
 		start_db_schedulers(db_htab);
 	}
 
+	CHECK_FOR_INTERRUPTS();
 
 	while (true)
 	{

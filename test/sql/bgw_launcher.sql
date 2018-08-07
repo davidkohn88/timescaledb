@@ -151,7 +151,50 @@ END
 $BODY$;
 SELECT wait_greater(:'orig_backend_start');
 
+/* make sure canceling the launcher backend causes a restart of schedulers */
+SELECT backend_start as orig_backend_start
+FROM pg_stat_activity
+WHERE application_name = 'Timescale BGW Scheduler Entrypoint'
+AND datname = 'single_2' \gset
+
+SELECT pg_cancel_backend(pid) FROM pg_stat_activity 
+WHERE application_name = 'Timescale BGW Cluster Launcher';
+
+SELECT wait_worker_counts(1,0,1);
+
+SELECT wait_greater(:'orig_backend_start');
+
+
+/* make sure dropping the extension means that the scheduler is stopped*/
 BEGIN;
 DROP EXTENSION timescaledb;
 COMMIT;
 SELECT wait_worker_counts(1,0,0);
+
+/* make sure terminating the launcher causes it to shut down permanently */
+
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity 
+WHERE application_name = 'Timescale BGW Cluster Launcher';
+
+SELECT wait_worker_counts(0,0,0);
+
+CREATE FUNCTION wait_no_change(INTEGER, INTEGER, INTEGER) RETURNS BOOLEAN LANGUAGE PLPGSQL AS
+$BODY$
+DECLARE
+r INTEGER;
+BEGIN
+FOR i in 1..10
+LOOP
+SELECT COUNT(*) from worker_counts where launcher=$1 AND single_scheduler=$2 AND single_2_scheduler=$3 into r;
+if(r = 1) THEN
+  PERFORM pg_sleep(0.1);
+  PERFORM pg_stat_clear_snapshot();
+ELSE
+  RETURN FALSE;
+END IF;
+END LOOP;
+RETURN TRUE;
+END
+$BODY$;
+SELECT wait_no_change(0,0,0);
+

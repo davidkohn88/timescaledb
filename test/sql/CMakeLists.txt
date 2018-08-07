@@ -5,7 +5,6 @@ set(TEST_FILES
   append.sql
   append_unoptimized.sql
   append_x_diff.sql
-  bgw_scheduler.sql
   chunks.sql
   cluster.sql
   constraint.sql
@@ -58,6 +57,7 @@ set(TEST_FILES
 
 IF(CMAKE_BUILD_TYPE MATCHES Debug)
   list(APPEND TEST_FILES
+    bgw_launcher.sql
     loader.sql)
 ENDIF(CMAKE_BUILD_TYPE MATCHES Debug)
 

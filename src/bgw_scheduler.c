@@ -73,7 +73,7 @@ static inline BgwHandleStatus ts_WaitForBackgroundWorkerShutdown(BackgroundWorke
 	return status;
 }
 
-
+/*Note that this is a boilerplate/mock for now just so we can test the launcher code*/
 extern Datum
 tsbgw_db_scheduler_main(PG_FUNCTION_ARGS)
 {
@@ -83,11 +83,11 @@ tsbgw_db_scheduler_main(PG_FUNCTION_ARGS)
 	/* TODO: SETUP BEFORE_SHMEM_EXIT_CALLBACK */
 
 	ereport(LOG, (errmsg("Versioned Worker started for Database id = %d with pid %d", MyDatabaseId, MyProcPid)));
+	CHECK_FOR_INTERRUPTS();
 
 	while (true)
 	{
 		int			wl_rc;
-
 		ereport(LOG, (errmsg("Database id = %d, Wake # %d ", MyDatabaseId, num_wakes)));
 		ereport(LOG, (errmsg("Unreserved Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
 		num_wakes++;

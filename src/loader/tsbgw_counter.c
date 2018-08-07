@@ -21,7 +21,7 @@ int guc_max_bgw_processes = 8;
  * since we don't want to exceed some configured value.
  * We were excited, briefly, about the possibility of using pg_sema for this,
  * unfortunately it does not appear to be accessible to code outside of postgres
- * core in any meaningful way. So we're not using that.
+ * core in any meaningful way. So we'r not using that.
  */
 
 
