@@ -9,7 +9,6 @@
 #include <utils/guc.h>
 #include <utils/inval.h>
 #include <nodes/print.h>
-#include <server/fmgr.h>
 #include <commands/dbcommands.h>
 
 #include "../extension_utils.c"

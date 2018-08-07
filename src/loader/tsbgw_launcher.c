@@ -491,7 +491,7 @@ tsbgw_cluster_launcher_main(void)
 	int			num_unreserved_workers;
 
 	pqsignal(SIGTERM, tsbgw_sigterm);
-
+	pqsignal(SIGINT, tsbgw_sigint);
 	BackgroundWorkerUnblockSignals();
 
 	if (!tsbgw_total_workers_increment())
