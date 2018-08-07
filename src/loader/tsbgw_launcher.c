@@ -10,7 +10,7 @@
 #include <storage/proc.h>
 #include <storage/shmem.h>
 
-#include <storage/ipc.h> /* for setting proc_exit callbacks*/
+#include <storage/ipc.h>		/* for setting proc_exit callbacks */
 
 /* for setting our wait event during waitlatch*/
 #include <pgstat.h>
@@ -75,14 +75,19 @@ typedef struct TsbgwHashEntry
  * these are just passthroughs and should maintain the same behavior unless BGWH_POSTMASTER_DIED is returned.
  */
 
-static inline void tsbgw_on_postmaster_death(void){
-	on_exit_reset(); /* don't call exit hooks cause we want to bail out quickly */
+static inline void
+tsbgw_on_postmaster_death(void)
+{
+	on_exit_reset();			/* don't call exit hooks cause we want to bail
+								 * out quickly */
 	ereport(FATAL,
-				(errcode(ERRCODE_ADMIN_SHUTDOWN),
-				errmsg("postmaster exited while pg_sleep(0.1) was working")));
+			(errcode(ERRCODE_ADMIN_SHUTDOWN),
+			 errmsg("postmaster exited while pg_sleep(0.1) was working")));
 }
-static inline BgwHandleStatus ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp){
-	BgwHandleStatus		status;
+static inline BgwHandleStatus
+ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp)
+{
+	BgwHandleStatus status;
 
 	if (handle == NULL)
 		status = BGWH_STOPPED;
@@ -94,8 +99,10 @@ static inline BgwHandleStatus ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *
 	return status;
 
 }
-static inline BgwHandleStatus ts_WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pidp){
-	BgwHandleStatus		status;
+static inline BgwHandleStatus
+ts_WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pidp)
+{
+	BgwHandleStatus status;
 
 	if (handle == NULL)
 		status = BGWH_STOPPED;
@@ -106,8 +113,10 @@ static inline BgwHandleStatus ts_WaitForBackgroundWorkerStartup(BackgroundWorker
 		tsbgw_on_postmaster_death();
 	return status;
 }
-static inline BgwHandleStatus ts_WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle){
-	BgwHandleStatus		status;
+static inline BgwHandleStatus
+ts_WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle)
+{
+	BgwHandleStatus status;
 
 	if (handle == NULL)
 		status = BGWH_STOPPED;
@@ -119,7 +128,9 @@ static inline BgwHandleStatus ts_WaitForBackgroundWorkerShutdown(BackgroundWorke
 	return status;
 }
 
-static inline void ts_TerminateBackgroundWorker(BackgroundWorkerHandle *handle){
+static inline void
+ts_TerminateBackgroundWorker(BackgroundWorkerHandle *handle)
+{
 	if (handle == NULL)
 		return;
 	else
@@ -288,17 +299,17 @@ start_db_schedulers(HTAB *db_htab)
 static void
 launcher_pre_shmem_cleanup(int code, Datum arg)
 {
-	HTAB 		*db_htab = (HTAB *) DatumGetPointer(arg);
+	HTAB	   *db_htab = (HTAB *) DatumGetPointer(arg);
 	HASH_SEQ_STATUS hash_seq;
 	TsbgwHashEntry *current_entry;
 
 	hash_seq_init(&hash_seq, db_htab);
 	/* stop everyone */
-	while ((current_entry = hash_seq_search(&hash_seq)) != NULL )
+	while ((current_entry = hash_seq_search(&hash_seq)) != NULL)
 		ts_TerminateBackgroundWorker(current_entry->db_scheduler_handle);
 
 	hash_destroy(db_htab);
-	/*must reinitialize shared memory structs if we want to restart*/
+	/* must reinitialize shared memory structs if we want to restart */
 	tsbgw_message_queue_shmem_cleanup();
 	tsbgw_counter_shmem_cleanup();
 }
@@ -473,11 +484,12 @@ launcher_handle_messages(HTAB *db_htab)
 static void
 tsbgw_sigterm(SIGNAL_ARGS)
 {
-	ereport(LOG,(errmsg("timescaledb launcher terminated by administrator command. Launcher will not restart after exiting.")));
+	ereport(LOG, (errmsg("timescaledb launcher terminated by administrator command. Launcher will not restart after exiting.")));
 	proc_exit(0);
 }
 
-static void tsbgw_sigint(SIGNAL_ARGS)
+static void
+tsbgw_sigint(SIGNAL_ARGS)
 {
 	ereport(ERROR, (errmsg("timescaledb launcher canceled by administrator command. Launcher will restart after exiting")));
 }
@@ -515,8 +527,9 @@ tsbgw_cluster_launcher_main(void)
 	num_unreserved_workers = guc_max_bgw_processes - tsbgw_total_workers_get();
 	if (num_unreserved_workers < hash_get_num_entries(db_htab))
 		ereport(LOG, (errmsg("total databases = %ld timescale background worker limit set to %d. ", hash_get_num_entries(db_htab), guc_max_bgw_processes),
-							errhint("you may start background workers manually by using the  _timescaledb_internal.start_background_workers() function in each database you would like to have a scheduler worker in.")));
-	else {
+					  errhint("you may start background workers manually by using the  _timescaledb_internal.start_background_workers() function in each database you would like to have a scheduler worker in.")));
+	else
+	{
 		for (n = 1; n <= hash_get_num_entries(db_htab); n++)
 			tsbgw_total_workers_increment();
 		start_db_schedulers(db_htab);
@@ -601,7 +614,8 @@ tsbgw_db_scheduler_entrypoint(Oid db_id)
 		versioned_scheduler_main_loop = load_external_function(soname, TSBGW_DB_SCHEDULER_FUNCNAME, false, NULL);
 		if (versioned_scheduler_main_loop == NULL)
 			ereport(LOG, (errmsg("version %s does not have a background worker, exiting.", soname)));
-		else /* essentially we morph into the versioned worker here */
+		else					/* essentially we morph into the versioned
+								 * worker here */
 			DirectFunctionCall1(versioned_scheduler_main_loop, InvalidOid);
 
 	}

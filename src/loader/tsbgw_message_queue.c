@@ -20,8 +20,8 @@ typedef struct TsbgwMessageQueue
 								 * startup */
 	LWLock	   *lock;			/* pointer to the lock to control
 								 * adding/removing elements from queue */
-	uint			read_upto;
-	uint			num_elements;
+	uint		read_upto;
+	uint		num_elements;
 	TsbgwMessage buffer[TSBGW_MAX_MESSAGES];
 }			TsbgwMessageQueue;
 
@@ -34,7 +34,8 @@ typedef enum QueueResponseType
 
 static TsbgwMessageQueue * tsbgw_mq = NULL;
 
-static void queue_init(bool reinit)
+static void
+queue_init(bool reinit)
 {
 	bool		found;
 
@@ -78,7 +79,7 @@ tsbgw_message_queue_alloc(void)
 /* Add a message to the queue - we can do this if the queue is not full */
 static QueueResponseType queue_add(TsbgwMessageQueue * queue, TsbgwMessage * message)
 {
-	QueueResponseType		message_sent = QUEUE_FULL;
+	QueueResponseType message_sent = QUEUE_FULL;
 	pid_t		reader_pid = InvalidPid;
 
 	LWLockAcquire(queue->lock, LW_EXCLUSIVE);
@@ -98,7 +99,9 @@ static QueueResponseType queue_add(TsbgwMessageQueue * queue, TsbgwMessage * mes
 	return message_sent;
 }
 
-static void queue_set_reader(TsbgwMessageQueue * queue){
+static void
+queue_set_reader(TsbgwMessageQueue * queue)
+{
 
 	LWLockAcquire(queue->lock, LW_EXCLUSIVE);
 	if (queue->reader_pid == InvalidPid)
@@ -155,14 +158,14 @@ static TsbgwMessage * tsbgw_message_create(TsbgwMessageType message_type, Oid db
 extern bool
 tsbgw_message_send_and_wait(TsbgwMessageType message_type, Oid db_oid)
 {
-	QueueResponseType		send_result;
+	QueueResponseType send_result;
 	shm_mq	   *ack_queue;
 	dsm_segment *seg;
 	shm_mq_handle *ack_queue_handle;
 	Size		bytes_received = 0;
 	bool	   *data = NULL;
 	TsbgwMessage *message;
-	bool		message_sent=false;
+	bool		message_sent = false;
 
 	message = tsbgw_message_create(message_type, db_oid);
 
@@ -197,6 +200,7 @@ tsbgw_message_queue_set_reader(void)
 {
 	queue_set_reader(tsbgw_mq);
 }
+
 /*
  * called by launcher once it has taken action based on the contents of the message
  * consumes message and deallocates
@@ -216,16 +220,23 @@ tsbgw_message_send_ack(TsbgwMessage * message, bool success)
 	dsm_detach(seg);
 	pfree(message);
 }
+
 /* this gets called before shmem exit in the launcher (even if we're exiting in error, but not if we're exiting due to possible shmem corruption)*/
-static void queue_shmem_cleanup(TsbgwMessageQueue *queue){
-	/* if anyone's waiting on an ack, we need to send them an ack with false, we won't actually process the message
-	 * action here, but we do need to tell them not to wait so they don't end up hanging after we quit*/
+static void
+queue_shmem_cleanup(TsbgwMessageQueue * queue)
+{
+	/*
+	 * if anyone's waiting on an ack, we need to send them an ack with false,
+	 * we won't actually process the message action here, but we do need to
+	 * tell them not to wait so they don't end up hanging after we quit
+	 */
 	LWLockAcquire(queue->lock, LW_EXCLUSIVE);
 	if (queue->reader_pid != MyProcPid)
 		ereport(ERROR, (errmsg("cannot read if not reader for TimescaleBGW message queue")));
 	while (queue->num_elements > 0)
 	{
 		TsbgwMessage *message;
+
 		message = palloc(sizeof(TsbgwMessage));
 		memcpy(message, &queue->buffer[queue->read_upto], sizeof(TsbgwMessage));
 		queue->read_upto = (queue->read_upto + 1) % TSBGW_MAX_MESSAGES;
@@ -233,10 +244,12 @@ static void queue_shmem_cleanup(TsbgwMessageQueue *queue){
 		tsbgw_message_send_ack(message, false);
 	}
 	LWLockRelease(queue->lock);
-	/* now reinitialize the queue*/
+	/* now reinitialize the queue */
 	queue_init(true);
 }
 
-extern void tsbgw_message_queue_shmem_cleanup(void){
+extern void
+tsbgw_message_queue_shmem_cleanup(void)
+{
 	queue_shmem_cleanup(tsbgw_mq);
 }

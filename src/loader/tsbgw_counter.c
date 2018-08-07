@@ -14,7 +14,8 @@
 
 #define TSBGW_COUNTER_STATE_NAME "tsbgw_counter_state"
 
-int guc_max_bgw_processes = 8;
+int			guc_max_bgw_processes = 8;
+
 /*
  * We need a bit of shared state here to deal with keeping track of
  * the total number of background workers we've launched across the instance
@@ -33,13 +34,14 @@ typedef struct TsbgwCounterState
 
 
 static TsbgwCounterState * tsbgw_ct = NULL;
-static void tsbgw_counter_state_init(bool reinit)
+static void
+tsbgw_counter_state_init(bool reinit)
 {
-	bool found;
+	bool		found;
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	tsbgw_ct = ShmemInitStruct(TSBGW_COUNTER_STATE_NAME, sizeof(TsbgwCounterState), &found);
-	if (!found || reinit)				/* initialize the shared memory structure */
+	if (!found || reinit)		/* initialize the shared memory structure */
 	{
 		memset(tsbgw_ct, 0, sizeof(TsbgwCounterState));
 		SpinLockInit(&tsbgw_ct->mutex);
@@ -48,7 +50,9 @@ static void tsbgw_counter_state_init(bool reinit)
 	LWLockRelease(AddinShmemInitLock);
 }
 
-extern void tsbgw_counter_setup_gucs(void){
+extern void
+tsbgw_counter_setup_gucs(void)
+{
 
 	DefineCustomIntVariable("timescaledb.max_bgw_processes",
 							"Maximum background worker processes allocated to TimescaleDB",
@@ -88,8 +92,9 @@ tsbgw_total_workers_increment()
 	int			max_workers = guc_max_bgw_processes;
 
 	SpinLockAcquire(&tsbgw_ct->mutex);
-	if (tsbgw_ct->total_workers < max_workers)	/* result can be <= max_workers,
-											 * so we test for less than */
+	if (tsbgw_ct->total_workers < max_workers)	/* result can be <=
+												 * max_workers, so we test for
+												 * less than */
 	{
 		tsbgw_ct->total_workers++;
 		incremented = true;

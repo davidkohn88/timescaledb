@@ -36,11 +36,14 @@
  * In the case of postmaster death, we run on_exit_reset (and should in any workers as well) and just get the hell out of there. Trying to communicate with other workers
  * will now be impossible because the postmaster doesn't exist and it mediated that communication.
  */
-static inline void tsbgw_on_postmaster_death(void){
-	on_exit_reset(); /* don't call exit hooks cause we want to bail out quickly */
+static inline void
+tsbgw_on_postmaster_death(void)
+{
+	on_exit_reset();			/* don't call exit hooks cause we want to bail
+								 * out quickly */
 	ereport(FATAL,
-				(errcode(ERRCODE_ADMIN_SHUTDOWN),
-				errmsg("postmaster exited while timescale bgw was working")));
+			(errcode(ERRCODE_ADMIN_SHUTDOWN),
+			 errmsg("postmaster exited while timescale bgw was working")));
 }
 
 /*
@@ -50,23 +53,32 @@ static inline void tsbgw_on_postmaster_death(void){
  * severity of issue.
  */
 
-static inline BgwHandleStatus ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp){
-	BgwHandleStatus		status;
+static inline BgwHandleStatus
+ts_GetBackgroundWorkerPid(BackgroundWorkerHandle *handle, pid_t *pidp)
+{
+	BgwHandleStatus status;
+
 	status = GetBackgroundWorkerPid(handle, pidp);
 	if (status == BGWH_POSTMASTER_DIED)
 		tsbgw_on_postmaster_death();
 	return status;
 
 }
-static inline BgwHandleStatus ts_WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pidp){
-	BgwHandleStatus		status;
+static inline BgwHandleStatus
+ts_WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pidp)
+{
+	BgwHandleStatus status;
+
 	status = WaitForBackgroundWorkerStartup(handle, pidp);
 	if (status == BGWH_POSTMASTER_DIED)
 		tsbgw_on_postmaster_death();
 	return status;
 }
-static inline BgwHandleStatus ts_WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle){
-	BgwHandleStatus		status;
+static inline BgwHandleStatus
+ts_WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *handle)
+{
+	BgwHandleStatus status;
+
 	status = WaitForBackgroundWorkerShutdown(handle);
 	if (status == BGWH_POSTMASTER_DIED)
 		tsbgw_on_postmaster_death();
@@ -88,6 +100,7 @@ tsbgw_db_scheduler_main(PG_FUNCTION_ARGS)
 	while (true)
 	{
 		int			wl_rc;
+
 		ereport(LOG, (errmsg("Database id = %d, Wake # %d ", MyDatabaseId, num_wakes)));
 		ereport(LOG, (errmsg("Unreserved Workers = %d", DatumGetInt32(DirectFunctionCall1(get_unreserved, Int8GetDatum(0))))));
 		num_wakes++;

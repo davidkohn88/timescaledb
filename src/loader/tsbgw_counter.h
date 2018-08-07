@@ -6,7 +6,7 @@
 
 
 
-extern int			guc_max_bgw_processes;
+extern int	guc_max_bgw_processes;
 
 extern void tsbgw_counter_shmem_alloc(void);
 extern void tsbgw_counter_shmem_startup(void);
