@@ -50,19 +50,44 @@ typedef enum QueueResponseType
 
 static MessageQueue *mq = NULL;
 
+/*
+ * This is run during the shmem_startup_hook.
+ * On Linux, it's only run once, but in EXEC_BACKEND mode / on Windows/ other systems
+ * that do forking differently, it is run in every backend at startup
+ */
 static void
-queue_init(void)
+queue_init()
 {
 	bool		found;
 
+
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	mq = ShmemInitStruct(BGW_MQ_NAME, sizeof(MessageQueue), &found);
+	if (!found)
+	{
+		memset(mq, 0, sizeof(MessageQueue));
+		mq->reader_pid = InvalidPid;
+		SpinLockInit(&mq->mutex);
+		mq->lock = &(GetNamedLWLockTranche(BGW_MQ_TRANCHE_NAME))->lock;
+	}
+	LWLockRelease(AddinShmemInitLock);
+
+}
+
+static void
+queue_reinit()
+{
+	LWLock	   *lock;
+
+	/*
+	 * Can't run GetNameLWLockTranche again in EXEC_BACKEND mode/Windows, so
+	 * we need to save current state and put it back after zeroing out rest
+	 */
+	lock = mq->lock;
 	memset(mq, 0, sizeof(MessageQueue));
 	mq->reader_pid = InvalidPid;
 	SpinLockInit(&mq->mutex);
-	mq->lock = &(GetNamedLWLockTranche(BGW_MQ_TRANCHE_NAME))->lock;
-	LWLockRelease(AddinShmemInitLock);
-
+	mq->lock = lock;
 }
 
 /* This gets called when shared memory is initialized in a backend
@@ -110,7 +135,7 @@ queue_set_reader(MessageQueue *queue)
 
 	if (queue_get_reader(queue) == InvalidPid)
 	{
-		queue_init();
+		queue_reinit();
 		SpinLockAcquire(&vq->mutex);
 		vq->reader_pid = MyProcPid;
 		SpinLockRelease(&vq->mutex);
@@ -395,8 +420,8 @@ bgw_message_send_ack(BgwMessage *message, bool success)
 
 		ack_res = send_ack(seg, success);
 		if (ack_res != ACK_SENT)
-			ereport(LOG, (errmsg("TimescaleDB background worker launcher unable to send ack to backend pid %d", message->sender_pid),
-						  errhint("Message: %s", message_ack_sent_err[ack_res])));
+			ereport(DEBUG1, (errmsg("TimescaleDB background worker launcher unable to send ack to backend pid %d", message->sender_pid),
+							 errhint("Reason: %s", message_ack_sent_err[ack_res])));
 		dsm_detach(seg);
 	}
 #if PG96
