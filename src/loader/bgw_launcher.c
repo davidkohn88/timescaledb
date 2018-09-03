@@ -335,12 +335,10 @@ start_db_schedulers(HTAB *db_htab)
 			ereport(LOG, (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
 						  errmsg("TimescaleDB background worker scheduler for at least one database unable to start"),
 						  errhint("%d schedulers have been started, %d databases remain without scheduler. Increase max_worker_processes and restart the server.", nstarted, (ndatabases - nstarted))));
-
 			/*
-			 * We incremented total workers until we had enough workers for
-			 * all databases, decrement by number we started
+			 * We incremented workers for all dbs, but we don't need to decrement, as that will happen
+			 * when we check for stopped workers, these workers will appear as stopped.
 			 */
-			bgw_total_workers_decrement_by(ndatabases - nstarted);
 			break;
 		}
 		wait_for_background_worker_startup(current_entry->db_scheduler_handle, &worker_pid);
@@ -387,6 +385,7 @@ stopped_db_schedulers_cleanup(HTAB *db_htab)
 		{
 			hash_search(db_htab, &current_entry->db_oid, HASH_REMOVE, &found);
 			bgw_total_workers_decrement();
+
 		}
 	}
 }
