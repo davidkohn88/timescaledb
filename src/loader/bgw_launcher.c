@@ -70,6 +70,7 @@ typedef struct DbHashEntry
 	Oid			db_oid;			/* key for the hash table, must be first */
 	BackgroundWorkerHandle *db_scheduler_handle;	/* needed to shut down
 													 * properly */
+	bool		incremented;
 } DbHashEntry;
 
 
@@ -284,7 +285,16 @@ populate_database_htab(void)
 		db_oid = HeapTupleGetOid(tup);
 		db_he = (DbHashEntry *) hash_search(db_htab, &db_oid, HASH_ENTER, &hash_found);
 		if (!hash_found)
+		{
 			db_he->db_scheduler_handle = NULL;
+
+			/*
+			 * initialize to true, as we'll increment by total number of
+			 * databases before starting any schedulers
+			 */
+			db_he->incremented = true;
+		}
+
 	}
 	heap_endscan(scan);
 	heap_close(rel, AccessShareLock);
@@ -316,6 +326,12 @@ start_db_schedulers(HTAB *db_htab)
 		ereport(LOG, (errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
 					  errmsg("total databases = %ld TimescaleDB background worker limit %d", hash_get_num_entries(db_htab), guc_max_background_workers),
 					  errhint("You may start background workers manually by using the  _timescaledb_internal.start_background_workers() function in each database you would like to have a scheduler worker in.")));
+		hash_seq_init(&hash_seq, db_htab);
+		/* mark everything unincremented because incrementing failed */
+		while ((current_entry = hash_seq_search(&hash_seq)) != NULL)
+		{
+			current_entry->incremented = false;
+		}
 		return;
 	}
 
@@ -382,17 +398,16 @@ stopped_db_schedulers_cleanup(HTAB *db_htab)
 {
 	HASH_SEQ_STATUS hash_seq;
 	DbHashEntry *current_entry;
-	bool		found;
 
 	hash_seq_init(&hash_seq, db_htab);
 	while ((current_entry = hash_seq_search(&hash_seq)) != NULL)
 	{
 		pid_t		worker_pid;
 
-		if (get_background_worker_pid(current_entry->db_scheduler_handle, &worker_pid) == BGWH_STOPPED)
+		if (get_background_worker_pid(current_entry->db_scheduler_handle, &worker_pid) == BGWH_STOPPED && current_entry->incremented)
 		{
-			hash_search(db_htab, &current_entry->db_oid, HASH_REMOVE, &found);
 			bgw_total_workers_decrement();
+			current_entry->incremented = false;
 		}
 	}
 }
@@ -414,7 +429,7 @@ message_start_action(HTAB *db_htab, BgwMessage *message, VirtualTransactionId vx
 	 * but hasn't been cleaned up yet, simply restart the worker without
 	 * incrementing cause we've already incremented
 	 */
-	if (!found)
+	if (!found || db_he->incremented != true)
 	{
 		if (!bgw_total_workers_increment())
 		{
@@ -423,7 +438,7 @@ message_start_action(HTAB *db_htab, BgwMessage *message, VirtualTransactionId vx
 			return;
 		}
 	}
-
+	db_he->incremented = true;
 	if (!found || get_background_worker_pid(db_he->db_scheduler_handle, &worker_pid) == BGWH_STOPPED)
 	{
 		worker_registered = register_entrypoint_for_db(db_he->db_oid, vxid, &db_he->db_scheduler_handle);
@@ -432,7 +447,7 @@ message_start_action(HTAB *db_htab, BgwMessage *message, VirtualTransactionId vx
 			report_error_on_worker_register_failure();
 			bgw_total_workers_decrement();	/* couldn't register the worker,
 											 * decrement and return false */
-			hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
+			db_he->incremented = false;
 			bgw_message_send_ack(message, ACK_FAILURE);
 			return;
 
@@ -476,7 +491,7 @@ message_restart_action(HTAB *db_htab, BgwMessage *message, VirtualTransactionId 
 	pid_t		worker_pid;
 
 	db_he = hash_search(db_htab, &message->db_oid, HASH_ENTER, &found);
-	if (found)
+	if (found && db_he->incremented)
 	{
 		terminate_background_worker(db_he->db_scheduler_handle);
 		wait_for_background_worker_shutdown(db_he->db_scheduler_handle);
@@ -489,13 +504,15 @@ message_restart_action(HTAB *db_htab, BgwMessage *message, VirtualTransactionId 
 		bgw_message_send_ack(message, ACK_FAILURE);
 		return;
 	}
+	db_he->incremented = true;	/* if we reach here, the worker is
+								 * incremented, one way or another */
 	worker_registered = register_entrypoint_for_db(db_he->db_oid, vxid, &db_he->db_scheduler_handle);
 	if (!worker_registered)
 	{
 		report_error_on_worker_register_failure();
 		bgw_total_workers_decrement();	/* couldn't register the worker,
 										 * decrement and return false */
-		hash_search(db_htab, &message->db_oid, HASH_REMOVE, &found);
+		db_he->incremented = false;
 		bgw_message_send_ack(message, ACK_FAILURE);
 		return;
 	}
