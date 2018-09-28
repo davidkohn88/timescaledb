@@ -28,8 +28,13 @@
 #include <optimizer/cost.h>
 #include <tcop/tcopprot.h>
 #include <optimizer/plancat.h>
-#include <catalog/pg_inherits_fn.h>
 #include <nodes/nodeFuncs.h>
+
+#include <catalog/pg_constraint.h>
+#include "compat.h"
+#if PG96 || PG10 /* <catalog>_fn.h files were consolidated into <catalog>.h in PG11*/
+#include <catalog/pg_constraint_fn.h>
+#endif
 #include "compat-msvc-exit.h"
 
 #include "hypertable_cache.h"
@@ -464,6 +469,9 @@ timescaledb_get_relation_info_hook(PlannerInfo *root,
 									  relation_objectid,
 									  inhparent,
 									  rel);
+#if !PG96 && !PG10
+		setup_append_rel_array(root);
+#endif
 
 		cache_release(hcache);
 	}
@@ -514,8 +522,17 @@ involves_hypertable(PlannerInfo *root, RelOptInfo *rel)
 	}
 }
 
+/*
+ * PG11 adds a value to the create_upper_paths_hook for FDW support. (See:
+ * https://github.com/postgres/postgres/commit/7e0d64c7a57e28fbcf093b6da9310a38367c1d75).
+ * Additionally, it calls the hook in a different place, once for each
+ * RelOptInfo (see:
+ * https://github.com/postgres/postgres/commit/c596fadbfe20ff50a8e5f4bc4b4ff5b7c302ecc0),
+ * we do not change our behavior yet, but might choose to in the future.
+ */
 static
 void
+#if PG96 || PG10
 timescale_create_upper_paths_hook(PlannerInfo *root,
 								  UpperRelationKind stage,
 								  RelOptInfo *input_rel,
@@ -523,6 +540,16 @@ timescale_create_upper_paths_hook(PlannerInfo *root,
 {
 	if (prev_create_upper_paths_hook != NULL)
 		prev_create_upper_paths_hook(root, stage, input_rel, output_rel);
+#else
+timescale_create_upper_paths_hook(PlannerInfo *root,
+								  UpperRelationKind stage,
+								  RelOptInfo *input_rel,
+								  RelOptInfo *output_rel,
+								  void * extra)
+{
+	if (prev_create_upper_paths_hook != NULL)
+		prev_create_upper_paths_hook(root, stage, input_rel, output_rel, extra);
+#endif
 
 	if (!extension_is_loaded() ||
 		guc_disable_optimizations ||

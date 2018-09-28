@@ -39,7 +39,11 @@ create_index_colnames(Relation indexrel)
 	int			i;
 
 	for (i = 0; i < indexrel->rd_att->natts; i++)
-		colnames = lappend(colnames, pstrdup(NameStr(indexrel->rd_att->attrs[i]->attname)));
+	{
+		Form_pg_attribute idxattr = TupleDescAttr(indexrel->rd_att, i);
+
+		colnames = lappend(colnames, pstrdup(NameStr(idxattr->attname)));
+	}
 
 	return colnames;
 }
@@ -85,7 +89,7 @@ find_attno_by_attname(TupleDesc tupdesc, Name attname)
 
 	for (i = 0; i < tupdesc->natts; i++)
 	{
-		FormData_pg_attribute *attr = tupdesc->attrs[i];
+		FormData_pg_attribute *attr = TupleDescAttr(tupdesc, i);
 
 		if (strncmp(NameStr(attr->attname), NameStr(*attname), NAMEDATALEN) == 0)
 			return attr->attnum;
@@ -100,7 +104,7 @@ find_attname_by_attno(TupleDesc tupdesc, AttrNumber attno)
 
 	for (i = 0; i < tupdesc->natts; i++)
 	{
-		FormData_pg_attribute *attr = tupdesc->attrs[i];
+		FormData_pg_attribute *attr = TupleDescAttr(tupdesc, i);
 
 		if (attr->attnum == attno)
 			return &attr->attname;
@@ -155,14 +159,17 @@ chunk_adjust_colref_attnos(IndexInfo *ii, Relation idxrel, Relation chunkrel)
 
 	for (i = 0; i < idxrel->rd_att->natts; i++)
 	{
-		FormData_pg_attribute *idxattr = idxrel->rd_att->attrs[i];
+		FormData_pg_attribute *idxattr = TupleDescAttr(idxrel->rd_att, i);
 		AttrNumber	attno = find_attno_by_attname(chunkrel->rd_att, &idxattr->attname);
 
 		if (attno == InvalidAttrNumber)
 			elog(ERROR, "index attribute %s not found in chunk",
 				 NameStr(idxattr->attname));
-
+#if PG96 || PG10
 		ii->ii_KeyAttrNumbers[i] = attno;
+#else
+		ii->ii_IndexAttrNumbers[i] = attno;
+#endif
 	}
 }
 
@@ -249,11 +256,13 @@ chunk_relation_index_create(Relation htrel,
 	oidvector  *indclassoid;
 	List	   *colnames = create_index_colnames(template_indexrel);
 	Oid			tablespace = InvalidOid;
-
+	bits16		flags = 0;
+	bits16		constr_flags = 0;
 	/*
 	 * Convert the IndexInfo's attnos to match the chunk instead of the
 	 * hypertable
 	 */
+
 	if (chunk_index_need_attnos_adjustment(RelationGetDescr(htrel), RelationGetDescr(chunkrel)))
 		chunk_adjust_attnos(indexinfo, htrel, template_indexrel, chunkrel);
 
@@ -284,7 +293,14 @@ chunk_relation_index_create(Relation htrel,
 	else
 		tablespace = chunk_index_select_tablespace(htrel, chunkrel);
 
-	chunk_indexrelid = index_create(chunkrel,
+	/* assign flags for index creation and constraint creation */
+	if (isconstraint)
+		flags |= INDEX_CREATE_ADD_CONSTRAINT;
+	if (template_indexrel->rd_index->indisprimary)
+		flags |= INDEX_CREATE_IS_PRIMARY;
+
+
+	chunk_indexrelid = index_create_compat(chunkrel,
 									indexname,
 									InvalidOid,
 									InvalidOid,
@@ -296,15 +312,10 @@ chunk_relation_index_create(Relation htrel,
 									indclassoid->values,
 									template_indexrel->rd_indoption,
 									reloptions,
-									template_indexrel->rd_index->indisprimary,
-									isconstraint,
-									false,	/* deferrable */
-									false,	/* init deferred */
+									flags,
+									constr_flags,
 									false,	/* allow system table mods */
-									false,	/* skip build */
-									false,	/* concurrent */
-									false,	/* is internal */
-									false); /* if not exists */
+									false); /* is internal */
 
 	ReleaseSysCache(tuple);
 
@@ -432,14 +443,11 @@ chunk_index_create_from_stmt(IndexStmt *stmt,
 												hypertable_indexname,
 												get_rel_namespace(chunkrelid));
 
-	idxobj = DefineIndex(chunkrelid,
+	idxobj = DefineIndexCompat(chunkrelid,
 						 stmt,
 						 InvalidOid,
 						 false, /* is alter table */
 						 true,	/* check rights */
-#if PG10
-						 false, /* check not in use */
-#endif
 						 false, /* skip build */
 						 true); /* quiet */
 

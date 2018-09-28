@@ -51,7 +51,7 @@ extern Hypertable *hypertable_get_by_id(int32 hypertable_id);
 extern Hypertable *hypertable_get_by_name(char *schema, char *name);
 extern bool hypertable_has_privs_of(Oid hypertable_oid, Oid userid);
 extern Oid	hypertable_permissions_check(Oid hypertable_oid, Oid userid);
-extern Hypertable *hypertable_from_tuple(HeapTuple tuple, MemoryContext mctx);
+extern Hypertable *hypertable_from_tupleinfo(TupleInfo *ti);
 extern int	hypertable_scan_with_memory_context(const char *schema, const char *table, tuple_found_func tuple_found, void *data, LOCKMODE lockmode, bool tuplock, MemoryContext mctx);
 extern int	hypertable_scan_relid(Oid table_relid, tuple_found_func tuple_found, void *data, LOCKMODE lockmode, bool tuplock);
 extern HTSU_Result hypertable_lock_tuple(Oid table_relid);

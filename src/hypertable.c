@@ -18,9 +18,6 @@
 #include <nodes/makefuncs.h>
 #include <nodes/value.h>
 #include <catalog/namespace.h>
-#include <catalog/pg_inherits_fn.h>
-#include <catalog/pg_constraint_fn.h>
-#include <catalog/pg_constraint.h>
 #include <catalog/indexing.h>
 #include <catalog/pg_proc.h>
 #include <commands/tablespace.h>
@@ -31,11 +28,19 @@
 #include <storage/lmgr.h>
 #include <miscadmin.h>
 
+#include <catalog/pg_constraint.h>
+#include <catalog/pg_inherits.h>
+#include "compat.h"
+#if PG96 || PG10 /* <catalog>_fn.h files were consolidated into <catalog>.h in PG11*/
+#include <catalog/pg_inherits_fn.h>
+#include <catalog/pg_constraint_fn.h>
+#endif
+
 #include "hypertable.h"
 #include "dimension.h"
 #include "chunk.h"
 #include "chunk_adaptive.h"
-#include "compat.h"
+
 #include "subspace_store.h"
 #include "hypertable_cache.h"
 #include "trigger.h"
@@ -78,6 +83,13 @@ hypertable_has_privs_of(Oid hypertable_oid, Oid userid)
 	return has_privs_of_role(userid, rel_get_owner(hypertable_oid));
 }
 
+/*
+ * The error output for permission denied errors such as these changed in PG11,
+ * it modifies places where relation is specified to note the specific object
+ * type we note that permissions are denied for the hypertable for all PG
+ * versions so that tests need not change due to one word changes in error
+ * messages and because it is more clear this way.
+ */
 Oid
 hypertable_permissions_check(Oid hypertable_oid, Oid userid)
 {
@@ -86,25 +98,25 @@ hypertable_permissions_check(Oid hypertable_oid, Oid userid)
 	if (!has_privs_of_role(userid, ownerid))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("permission denied for relation \"%s\"",
+				 errmsg("permission denied for hypertable \"%s\"",
 						get_rel_name(hypertable_oid))));
 
 	return ownerid;
 }
 
 Hypertable *
-hypertable_from_tuple(HeapTuple tuple, MemoryContext mctx)
+hypertable_from_tupleinfo(TupleInfo *ti)
 {
 	Oid			namespace_oid;
-	Hypertable *h = STRUCT_FROM_TUPLE(tuple, mctx, Hypertable, FormData_hypertable);
+	Hypertable *h = STRUCT_FROM_TUPLE(ti->tuple, ti->mctx, Hypertable, FormData_hypertable);
 
 	namespace_oid = get_namespace_oid(NameStr(h->fd.schema_name), false);
 	h->main_table_relid = get_relname_relid(NameStr(h->fd.table_name), namespace_oid);
-	h->space = dimension_scan(h->fd.id, h->main_table_relid, h->fd.num_dimensions, mctx);
-	h->chunk_cache = subspace_store_init(h->space, mctx, guc_max_cached_chunks_per_hypertable);
+	h->space = dimension_scan(h->fd.id, h->main_table_relid, h->fd.num_dimensions, ti->mctx);
+	h->chunk_cache = subspace_store_init(h->space, ti->mctx, guc_max_cached_chunks_per_hypertable);
 
-	if (!heap_attisnull(tuple, Anum_hypertable_chunk_sizing_func_schema) &&
-		!heap_attisnull(tuple, Anum_hypertable_chunk_sizing_func_name))
+	if (!heap_attisnull_compat(ti->tuple, Anum_hypertable_chunk_sizing_func_schema, ti->desc) &&
+		!heap_attisnull_compat(ti->tuple, Anum_hypertable_chunk_sizing_func_name, ti->desc))
 	{
 		FuncCandidateList func =
 		FuncnameGetCandidates(list_make2(makeString(NameStr(h->fd.chunk_sizing_func_schema)),
@@ -218,7 +230,7 @@ hypertable_tuple_append(TupleInfo *ti, void *data)
 {
 	List	  **hypertables = data;
 
-	*hypertables = lappend(*hypertables, hypertable_from_tuple(ti->tuple, ti->mctx));
+	*hypertables = lappend(*hypertables,  hypertable_from_tupleinfo(ti));
 
 	return SCAN_CONTINUE;
 }
@@ -657,8 +669,9 @@ hypertable_tuple_found(TupleInfo *ti, void *data)
 {
 	Hypertable **entry = data;
 
-	*entry = hypertable_from_tuple(ti->tuple, ti->mctx);
+	*entry = hypertable_from_tupleinfo(ti);
 	return SCAN_DONE;
+
 }
 
 Hypertable *
@@ -993,7 +1006,7 @@ hypertable_create_schema(const char *schema_name)
 
 	CreateSchemaCommand(&stmt,
 						"(generated CREATE SCHEMA command)"
-#if PG10
+#if !PG96
 						,-1, -1
 #endif
 		);
@@ -1019,7 +1032,7 @@ hypertable_validate_constraints(Oid relid)
 	ScanKeyInit(&scankey, Anum_pg_constraint_conrelid, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(catalog, ConstraintRelidIndexId, true,
+	scan = systable_beginscan(catalog, ConstraintRelidTypidNameIndexId, true,
 							  NULL, 1, &scankey);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -1167,7 +1180,7 @@ insert_blocker_trigger_add(Oid relid)
 	 * the hypertable. This call will error out if a trigger with the same
 	 * name already exists. (This is the desired behavior.)
 	 */
-	objaddr = CreateTrigger(&stmt, NULL, relid, InvalidOid, InvalidOid, InvalidOid, false);
+	objaddr = CreateTriggerCompat(&stmt, NULL, relid, InvalidOid, InvalidOid, InvalidOid, false);
 
 	if (!OidIsValid(objaddr.objectId))
 		elog(ERROR, "could not create insert blocker trigger");

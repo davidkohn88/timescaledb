@@ -9,16 +9,23 @@
 #include <parser/parsetree.h>
 #include <optimizer/var.h>
 #include <optimizer/restrictinfo.h>
-#include <catalog/pg_inherits_fn.h>
 #include <nodes/plannodes.h>
 #include <optimizer/prep.h>
 #include <nodes/nodeFuncs.h>
+
+#include <catalog/pg_constraint.h>
+#include <catalog/pg_inherits.h>
+#include "compat.h"
+#if PG96 || PG10 /* <catalog>_fn.h files were consolidated into <catalog>.h in PG11*/
+#include <catalog/pg_constraint_fn.h>
+#include <catalog/pg_inherits_fn.h>
+#endif
+#include <optimizer/pathnode.h>
 
 #include "plan_expand_hypertable.h"
 #include "hypertable.h"
 #include "hypertable_restrict_info.h"
 #include "planner_import.h"
-#include "compat.h"
 
 
 
@@ -105,7 +112,7 @@ find_children_oids(HypertableRestrictInfo *hri, Hypertable *ht, LOCKMODE lockmod
 	 * otherwise using the cached inheritance hierarchy is faster.
 	 */
 	if (!hypertable_restrict_info_has_restrictions(hri))
-		return find_all_inheritors(ht->main_table_relid, lockmode, NULL);;
+		return find_all_inheritors(ht->main_table_relid, lockmode, NULL);
 
 	/* always include parent again, just as find_all_inheritors does */
 	result = list_make1_oid(ht->main_table_relid);
@@ -252,4 +259,11 @@ plan_expand_hypertable_chunks(Hypertable *ht,
 	heap_close(oldrelation, NoLock);
 
 	root->append_rel_list = list_concat(root->append_rel_list, appinfos);
+#if !PG96 && !PG10
+/*
+ * PG11 introduces a separate array to make looking up children faster, see:
+ * https://github.com/postgres/postgres/commit/7d872c91a3f9d49b56117557cdbb0c3d4c620687.
+ */
+	setup_append_rel_array(root);
+#endif
 }

@@ -104,10 +104,10 @@ hyperspace_get_num_dimensions_by_type(Hyperspace *hs, DimensionType type)
 }
 
 static inline DimensionType
-dimension_type(HeapTuple tuple)
+dimension_type(TupleInfo *ti)
 {
 	/* If there is no partitioning func set we assume open dimension */
-	if (heap_attisnull(tuple, Anum_dimension_partitioning_func))
+	if (heap_attisnull_compat(ti->tuple, Anum_dimension_partitioning_func, ti->desc))
 		return DIMENSION_TYPE_OPEN;
 	return DIMENSION_TYPE_CLOSED;
 }
@@ -124,7 +124,7 @@ dimension_fill_in_from_tuple(Dimension *d, TupleInfo *ti, Oid main_table_relid)
 	 */
 	heap_deform_tuple(ti->tuple, ti->desc, values, isnull);
 
-	d->type = dimension_type(ti->tuple);
+	d->type = dimension_type(ti);
 	d->fd.id = DatumGetInt32(values[AttrNumberGetAttrOffset(Anum_dimension_id)]);
 	d->fd.hypertable_id = DatumGetInt32(values[AttrNumberGetAttrOffset(Anum_dimension_hypertable_id)]);
 	d->fd.aligned = DatumGetBool(values[AttrNumberGetAttrOffset(Anum_dimension_aligned)]);
