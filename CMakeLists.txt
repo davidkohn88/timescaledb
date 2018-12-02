@@ -115,10 +115,10 @@ if (UNIX)
     bin/postgres
     HINTS
     $ENV{HOME}
+    PATH_SUFFIXES
     /opt/local/pgsql
     /usr/local/pgsql
     /usr/lib/postgresql
-    PATH_SUFFIXES
     bin
     10/bin
     9.6/bin
@@ -152,12 +152,18 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE)
 
 if (NOT ${PG_VERSION_STRING} MATCHES "^PostgreSQL[ ]+([0-9]+)\\.([0-9]+)(\\.([0-9]+))*")
-  message(FATAL_ERROR "Could not parse PostgreSQL version ${PG_VERSION_STRING}")
+#  message(FATAL_ERROR "Could not parse PostgreSQL version ${PG_VERSION_STRING}")
+  message(STATUS "Could not parse PostgreSQL version ${PG_VERSION_STRING}")
+  set(PG_VERSION_MAJOR "11")
+  set(PG_VERSION_MINOR "0")
+  set(PG_VERSION_PATCH "")
+
+else ()
+  set(PG_VERSION_MAJOR ${CMAKE_MATCH_1})
+  set(PG_VERSION_MINOR ${CMAKE_MATCH_2})
+  set(PG_VERSION_PATCH ${CMAKE_MATCH_4})
 endif ()
 
-set(PG_VERSION_MAJOR ${CMAKE_MATCH_1})
-set(PG_VERSION_MINOR ${CMAKE_MATCH_2})
-set(PG_VERSION_PATCH ${CMAKE_MATCH_4})
 
 if (NOT ${PG_VERSION_PATCH} OR ${PG_VERSION_PATCH} EQUAL "")
   set(PG_VERSION "${PG_VERSION_MAJOR}.${PG_VERSION_MINOR}")
@@ -168,8 +174,9 @@ endif ()
 message(STATUS "Compiling against PostgreSQL version ${PG_VERSION}")
 
 if ((${PG_VERSION} VERSION_LESS "9.6")
-    OR (${PG_VERSION} VERSION_EQUAL "11")
-    OR (${PG_VERSION} VERSION_GREATER "11"))
+    OR (${PG_VERSION} VERSION_GREATER "13")
+  )
+#    OR (${PG_VERSION} VERSION_EQUAL "11")
   message(FATAL_ERROR "TimescaleDB only supports PostgreSQL 9.6 or 10")
 endif ()
 
@@ -300,3 +307,10 @@ endif (UNIX)
 add_subdirectory(test)
 add_subdirectory(sql)
 add_subdirectory(src)
+
+add_custom_target(licensecheck
+  SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_license_apache.sh -c ${CMAKE_CURRENT_SOURCE_DIR}/src
+  COMMAND SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_license_apache.sh -s ${CMAKE_CURRENT_SOURCE_DIR}/sql
+  COMMAND SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_license_apache.sh -c ${CMAKE_CURRENT_SOURCE_DIR}/test
+  COMMAND SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_license_apache.sh -t ${CMAKE_CURRENT_SOURCE_DIR}/test
+  USES_TERMINAL)

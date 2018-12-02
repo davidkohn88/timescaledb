@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <fmgr.h>
 #include <utils/lsyscache.h>
@@ -93,7 +99,7 @@ tablespaces_contain(Tablespaces *tspcs, Oid tspc_oid)
 }
 
 
-static bool
+static ScanTupleResult
 tablespace_tuple_found(TupleInfo *ti, void *data)
 {
 	Tablespaces *tspcs = data;
@@ -103,7 +109,7 @@ tablespace_tuple_found(TupleInfo *ti, void *data)
 	if (NULL != tspcs)
 		tablespaces_add(tspcs, form, tspcoid);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 static int
@@ -111,7 +117,7 @@ tablespace_scan_internal(int indexid,
 						 ScanKeyData *scankey,
 						 int nkeys,
 						 tuple_found_func tuple_found,
-						 tuple_found_func tuple_filter,
+						 tuple_filter_func tuple_filter,
 						 void *data,
 						 int limit,
 						 LOCKMODE lockmode)
@@ -226,7 +232,7 @@ validate_revoke_create(Oid tspcoid, Oid role, Oid relid)
  *
  * This check should be done after the REVOKE has been applied.
  */
-static bool
+static ScanTupleResult
 revoke_tuple_found(TupleInfo *ti, void *data)
 {
 	TablespaceScanInfo *info = data;
@@ -253,7 +259,7 @@ revoke_tuple_found(TupleInfo *ti, void *data)
 		validate_revoke_create(tspcoid, relowner, ht->main_table_relid);
 	}
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 void
@@ -269,7 +275,7 @@ tablespace_validate_revoke(GrantStmt *stmt)
  *
  * This check should be done after the REVOKE has been applied.
  */
-static bool
+static ScanTupleResult
 revoke_role_tuple_found(TupleInfo *ti, void *data)
 {
 	TablespaceScanInfo *info = data;
@@ -302,7 +308,7 @@ revoke_role_tuple_found(TupleInfo *ti, void *data)
 		validate_revoke_create(tspcoid, relowner, ht->main_table_relid);
 	}
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 void
@@ -345,7 +351,7 @@ tablespace_insert(int32 hypertable_id, const char *tspcname)
 	return id;
 }
 
-static bool
+static ScanTupleResult
 tablespace_tuple_delete(TupleInfo *ti, void *data)
 {
 	TablespaceScanInfo *info = data;
@@ -355,7 +361,7 @@ tablespace_tuple_delete(TupleInfo *ti, void *data)
 	catalog_delete_only(ti->scanrel, ti->tuple);
 	catalog_restore_user(&sec_ctx);
 
-	return (info->stopcount == 0 || ti->count < info->stopcount);
+	return (info->stopcount == 0 || ti->count < info->stopcount) ? SCAN_CONTINUE : SCAN_DONE;
 }
 
 int
@@ -398,7 +404,7 @@ tablespace_delete(int32 hypertable_id, const char *tspcname)
 	return num_deleted;
 }
 
-static bool
+static ScanFilterResult
 tablespace_tuple_owner_filter(TupleInfo *ti, void *data)
 {
 	TablespaceScanInfo *info = data;
@@ -410,11 +416,11 @@ tablespace_tuple_owner_filter(TupleInfo *ti, void *data)
 	Assert(NULL != ht);
 
 	if (hypertable_has_privs_of(ht->main_table_relid, info->userid))
-		return true;
+		return SCAN_INCLUDE;
 
 	info->num_filtered++;
 
-	return false;
+	return SCAN_EXCLUDE;
 }
 
 static int

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <access/xact.h>
 #include <fmgr.h>
@@ -7,13 +13,13 @@
 #include <utils/json.h>
 #include <utils/jsonb.h>
 
-#include "compat.h"
 #include "config.h"
 #include "version.h"
 #include "guc.h"
+#include "hypertable.h"
+#include "compat.h"
 #include "telemetry.h"
 #include "metadata.h"
-#include "hypertable.h"
 #include "extension.h"
 #include "net/http.h"
 

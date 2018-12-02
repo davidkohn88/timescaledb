@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <catalog/index.h>
 #include <catalog/indexing.h>
@@ -33,7 +39,11 @@ create_index_colnames(Relation indexrel)
 	int			i;
 
 	for (i = 0; i < indexrel->rd_att->natts; i++)
-		colnames = lappend(colnames, pstrdup(NameStr(indexrel->rd_att->attrs[i]->attname)));
+	{
+		Form_pg_attribute attr = TupleDescAttr(indexrel->rd_att, i);
+
+		colnames = lappend(colnames, pstrdup(NameStr(attr->attname)));
+	}
 
 	return colnames;
 }
@@ -79,7 +89,7 @@ find_attno_by_attname(TupleDesc tupdesc, Name attname)
 
 	for (i = 0; i < tupdesc->natts; i++)
 	{
-		FormData_pg_attribute *attr = tupdesc->attrs[i];
+		FormData_pg_attribute *attr = TupleDescAttr(tupdesc, i);
 
 		if (strncmp(NameStr(attr->attname), NameStr(*attname), NAMEDATALEN) == 0)
 			return attr->attnum;
@@ -94,7 +104,7 @@ find_attname_by_attno(TupleDesc tupdesc, AttrNumber attno)
 
 	for (i = 0; i < tupdesc->natts; i++)
 	{
-		FormData_pg_attribute *attr = tupdesc->attrs[i];
+		FormData_pg_attribute *attr = TupleDescAttr(tupdesc, i);
 
 		if (attr->attnum == attno)
 			return &attr->attname;
@@ -149,7 +159,7 @@ chunk_adjust_colref_attnos(IndexInfo *ii, Relation idxrel, Relation chunkrel)
 
 	for (i = 0; i < idxrel->rd_att->natts; i++)
 	{
-		FormData_pg_attribute *idxattr = idxrel->rd_att->attrs[i];
+		FormData_pg_attribute *idxattr = TupleDescAttr(idxrel->rd_att, i);
 		AttrNumber	attno = find_attno_by_attname(chunkrel->rd_att, &idxattr->attname);
 
 		if (attno == InvalidAttrNumber)
@@ -224,6 +234,89 @@ chunk_index_select_tablespace(Relation htrel, Relation chunkrel)
 	return tablespace_oid;
 }
 
+#if PG11
+static Oid
+index_createCompat(Relation heapRelation,
+                         const char *indexRelationName,
+                         Oid indexRelationId,
+                         Oid relFileNode,
+                         IndexInfo *indexInfo,
+                         List *indexColNames,
+                         Oid accessMethodObjectId,
+                         Oid tableSpaceId,
+                         Oid *collationObjectId,
+                         Oid *classObjectId,
+                         int16 *coloptions,
+                         Datum reloptions,
+                         bool isprimary,
+                         bool isconstraint,
+                         bool deferrable,
+                         bool initdeferred,
+                         bool allow_system_table_mods,
+                         bool skip_build,
+                         bool concurrent,
+                         bool is_internal,
+                         bool if_not_exists)
+{
+	bits16          flags;
+	bits16          constr_flags;
+	flags = constr_flags = 0;
+	if (isconstraint)
+		flags |= INDEX_CREATE_ADD_CONSTRAINT;
+    if (skip_build || concurrent)
+		flags |= INDEX_CREATE_SKIP_BUILD;
+    if (if_not_exists)
+		flags |= INDEX_CREATE_IF_NOT_EXISTS;
+    if (concurrent)
+		flags |= INDEX_CREATE_CONCURRENT;
+    if (isprimary)
+		flags |= INDEX_CREATE_IS_PRIMARY;
+
+    if (deferrable)
+		constr_flags |= INDEX_CONSTR_CREATE_DEFERRABLE;
+    if (initdeferred)
+		constr_flags |= INDEX_CONSTR_CREATE_INIT_DEFERRED;
+
+
+	return index_create(heapRelation, 
+						indexRelationName, 
+						indexRelationId, 
+#if PG11
+/* not until 
+commit 8b08f7d4820fd7a8ef6152a9dd8c6e3cb01e5f99 (HEAD)
+Author: Alvaro Herrera <alvherre@alvh.no-ip.org>
+Date:   Fri Jan 19 11:49:22 2018 -0300
+*/
+						 InvalidOid, /* parentIndexRelid */
+#endif
+#if PG11
+/* not until 
+commit eb7ed3f3063401496e4aa4bd68fa33f0be31a72f
+Author: Alvaro Herrera <alvherre@alvh.no-ip.org>
+Date:   Mon Feb 19 16:59:37 2018 -0300
+
+    Allow UNIQUE indexes on partitioned tables
+*/
+						 //InvalidOid, /* parentConstraintId */
+						 InvalidOid, /* parentConstraintId */
+#endif
+						
+		  				 relFileNode, 
+		  				 indexInfo, 
+		  				 indexColNames, 
+		  				 accessMethodObjectId,
+		  				 tableSpaceId, 
+                         collationObjectId,
+                         classObjectId,
+                         coloptions,
+                         reloptions, 
+                         flags, constr_flags, 
+//                         allow_system_table_mods, if_not_exists, NULL); 
+                          allow_system_table_mods, is_internal, NULL); 
+}
+#else
+#define index_createCompat index_create
+#endif
 /*
  * Create a chunk index based on the configuration of the "parent" index.
  */
@@ -278,7 +371,7 @@ chunk_relation_index_create(Relation htrel,
 	else
 		tablespace = chunk_index_select_tablespace(htrel, chunkrel);
 
-	chunk_indexrelid = index_create(chunkrel,
+	chunk_indexrelid = index_createCompat(chunkrel,
 									indexname,
 									InvalidOid,
 									InvalidOid,
@@ -548,7 +641,7 @@ chunk_index_mapping_from_tuple(TupleInfo *ti, ChunkIndexMapping *cim)
 	return cim;
 }
 
-static bool
+static ScanTupleResult
 chunk_index_collect(TupleInfo *ti, void *data)
 {
 	List	  **mappings = data;
@@ -556,7 +649,7 @@ chunk_index_collect(TupleInfo *ti, void *data)
 
 	*mappings = lappend(*mappings, cim);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 List *
@@ -587,7 +680,7 @@ typedef struct ChunkIndexDeleteData
 	bool		drop_index;
 } ChunkIndexDeleteData;
 
-static bool
+static ScanTupleResult
 chunk_index_tuple_delete(TupleInfo *ti, void *data)
 {
 	FormData_chunk_index *chunk_index = (FormData_chunk_index *) GETSTRUCT(ti->tuple);
@@ -607,10 +700,10 @@ chunk_index_tuple_delete(TupleInfo *ti, void *data)
 			performDeletion(&idxobj, DROP_RESTRICT, 0);
 	}
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
-static bool
+static ScanFilterResult
 chunk_index_name_and_schema_filter(TupleInfo *ti, void *data)
 {
 	FormData_chunk_index *chunk_index = (FormData_chunk_index *) GETSTRUCT(ti->tuple);
@@ -621,7 +714,7 @@ chunk_index_name_and_schema_filter(TupleInfo *ti, void *data)
 		Chunk	   *chunk = chunk_get_by_id(chunk_index->chunk_id, 0, false);
 
 		if (NULL != chunk && namestrcmp(&chunk->fd.schema_name, cid->schema) == 0)
-			return true;
+			return SCAN_INCLUDE;
 	}
 
 	if (namestrcmp(&chunk_index->hypertable_index_name, cid->index_name) == 0)
@@ -631,10 +724,10 @@ chunk_index_name_and_schema_filter(TupleInfo *ti, void *data)
 		ht = hypertable_get_by_id(chunk_index->hypertable_id);
 
 		if (NULL != ht && namestrcmp(&ht->fd.schema_name, cid->schema) == 0)
-			return true;
+			return SCAN_INCLUDE;
 	}
 
-	return false;
+	return SCAN_EXCLUDE;
 }
 
 int
@@ -719,7 +812,6 @@ chunk_index_delete_by_hypertable_id(int32 hypertable_id, bool drop_index)
 		.drop_index = drop_index,
 	};
 
-
 	ScanKeyInit(&scankey[0],
 				Anum_chunk_index_hypertable_id_hypertable_index_name_idx_hypertable_id,
 				BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(hypertable_id));
@@ -728,13 +820,13 @@ chunk_index_delete_by_hypertable_id(int32 hypertable_id, bool drop_index)
 								   scankey, 1, chunk_index_tuple_delete, NULL, &data);
 }
 
-static bool
+static ScanTupleResult
 chunk_index_tuple_found(TupleInfo *ti, void *const data)
 {
 	ChunkIndexMapping *const cim = data;
 
 	chunk_index_mapping_from_tuple(ti, cim);
-	return false;
+	return SCAN_DONE;
 }
 
 
@@ -758,7 +850,7 @@ chunk_index_get_by_indexrelid(Chunk *chunk, Oid chunk_indexrelid)
 	return cim;
 }
 
-static bool
+static ScanFilterResult
 chunk_hypertable_index_name_filter(TupleInfo *ti, void *data)
 {
 	FormData_chunk_index *chunk_index = (FormData_chunk_index *) GETSTRUCT(ti->tuple);
@@ -766,9 +858,9 @@ chunk_hypertable_index_name_filter(TupleInfo *ti, void *data)
 	const char *hypertable_indexname = get_rel_name(cim->parent_indexoid);
 
 	if (namestrcmp(&chunk_index->hypertable_index_name, hypertable_indexname) == 0)
-		return true;
+		return SCAN_INCLUDE;
 
-	return false;
+	return SCAN_EXCLUDE;
 }
 
 ChunkIndexMapping *
@@ -797,7 +889,7 @@ typedef struct ChunkIndexRenameInfo
 	bool		isparent;
 } ChunkIndexRenameInfo;
 
-static bool
+static ScanTupleResult
 chunk_index_tuple_rename(TupleInfo *ti, void *data)
 {
 	ChunkIndexRenameInfo *info = data;
@@ -832,9 +924,9 @@ chunk_index_tuple_rename(TupleInfo *ti, void *data)
 	heap_freetuple(tuple);
 
 	if (info->isparent)
-		return true;
+		return SCAN_CONTINUE;
 
-	return false;
+	return SCAN_DONE;
 }
 
 int
@@ -878,7 +970,7 @@ chunk_index_rename_parent(Hypertable *ht, Oid hypertable_indexrelid, const char 
 								   scankey, 2, chunk_index_tuple_rename, NULL, &renameinfo);
 }
 
-static bool
+static ScanTupleResult
 chunk_index_tuple_set_tablespace(TupleInfo *ti, void *data)
 {
 	char	   *tablespace = data;
@@ -894,7 +986,7 @@ chunk_index_tuple_set_tablespace(TupleInfo *ti, void *data)
 
 	AlterTableInternal(indexrelid, cmds, false);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 int
@@ -926,6 +1018,7 @@ chunk_index_mark_clustered(Oid chunkrelid, Oid indexrelid)
 }
 
 TS_FUNCTION_INFO_V1(ts_chunk_index_clone);
+
 Datum
 ts_chunk_index_clone(PG_FUNCTION_ARGS)
 {
@@ -963,6 +1056,7 @@ ts_chunk_index_clone(PG_FUNCTION_ARGS)
 }
 
 TS_FUNCTION_INFO_V1(ts_chunk_index_replace);
+
 Datum
 ts_chunk_index_replace(PG_FUNCTION_ARGS)
 {

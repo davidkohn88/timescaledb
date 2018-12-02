@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <nodes/plannodes.h>
 #include <nodes/relation.h>
@@ -23,7 +29,6 @@
 #include <optimizer/cost.h>
 #include <tcop/tcopprot.h>
 #include <optimizer/plancat.h>
-#include <catalog/pg_inherits_fn.h>
 #include <nodes/nodeFuncs.h>
 #include "compat-msvc-exit.h"
 
@@ -42,6 +47,7 @@
 #include "chunk.h"
 #include "plan_expand_hypertable.h"
 #include "plan_add_hashagg.h"
+#include "compat.h"
 
 void		_planner_init(void);
 void		_planner_fini(void);
@@ -514,10 +520,18 @@ void
 timescale_create_upper_paths_hook(PlannerInfo *root,
 								  UpperRelationKind stage,
 								  RelOptInfo *input_rel,
-								  RelOptInfo *output_rel)
+								  RelOptInfo *output_rel
+#if PG11
+								  , void *extra
+#endif
+								  )
 {
 	if (prev_create_upper_paths_hook != NULL)
-		prev_create_upper_paths_hook(root, stage, input_rel, output_rel);
+		prev_create_upper_paths_hook(root, stage, input_rel, output_rel
+#if PG11
+		, extra
+#endif
+		);
 
 	if (!extension_is_loaded() ||
 		guc_disable_optimizations ||

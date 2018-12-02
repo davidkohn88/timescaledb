@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <catalog/pg_type.h>
 #include <access/relscan.h>
@@ -8,9 +14,6 @@
 #include <utils/timestamp.h>
 #include <funcapi.h>
 #include <miscadmin.h>
-#ifdef _WIN32
-#include <stdint.h>
-#endif
 
 #include "catalog.h"
 #include "compat.h"
@@ -303,7 +306,7 @@ hyperspace_create(int32 hypertable_id, Oid main_table_relid, uint16 num_dimensio
 	return hs;
 }
 
-static bool
+static ScanTupleResult
 dimension_tuple_found(TupleInfo *ti, void *data)
 {
 	Hyperspace *hs = data;
@@ -311,7 +314,7 @@ dimension_tuple_found(TupleInfo *ti, void *data)
 
 	dimension_fill_in_from_tuple(d, ti, hs->main_table_relid);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 static int
@@ -366,7 +369,7 @@ dimension_scan(int32 hypertable_id, Oid main_table_relid, int16 num_dimensions, 
 	return space;
 }
 
-static bool
+static ScanTupleResult
 dimension_find_hypertable_id_tuple_found(TupleInfo *ti, void *data)
 {
 	int32	   *hypertable_id = data;
@@ -374,7 +377,7 @@ dimension_find_hypertable_id_tuple_found(TupleInfo *ti, void *data)
 
 	*hypertable_id = heap_getattr(ti->tuple, Anum_dimension_hypertable_id, ti->desc, &isnull);
 
-	return false;
+	return SCAN_DONE;
 }
 
 int32
@@ -432,7 +435,7 @@ dimension_scan_update(int32 dimension_id, tuple_found_func tuple_found, void *da
 	return scanner_scan(&scanctx);
 }
 
-static bool
+static ScanTupleResult
 dimension_tuple_delete(TupleInfo *ti, void *data)
 {
 	CatalogSecurityContext sec_ctx;
@@ -450,7 +453,7 @@ dimension_tuple_delete(TupleInfo *ti, void *data)
 	catalog_delete(ti->scanrel, ti->tuple);
 	catalog_restore_user(&sec_ctx);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 int
@@ -472,7 +475,7 @@ dimension_delete_by_hypertable_id(int32 hypertable_id, bool delete_slices)
 								   CurrentMemoryContext);
 }
 
-static bool
+static ScanTupleResult
 dimension_tuple_update(TupleInfo *ti, void *data)
 {
 	Dimension  *dim = data;
@@ -503,7 +506,7 @@ dimension_tuple_update(TupleInfo *ti, void *data)
 	catalog_update_tid(ti->scanrel, &ti->tuple->t_self, tuple);
 	catalog_restore_user(&sec_ctx);
 
-	return false;
+	return SCAN_DONE;
 }
 
 static int32
@@ -661,10 +664,10 @@ interval_to_usec(Interval *interval)
 }
 
 #define INT_TYPE_MAX(type)												\
-	(int64)(((type) == INT2OID) ? INT16_MAX : (((type) == INT4OID) ? INT32_MAX : INT64_MAX))
+	(int64)(((type) == INT2OID) ? PG_INT16_MAX : (((type) == INT4OID) ? PG_INT32_MAX : PG_INT64_MAX))
 
 #define IS_VALID_NUM_SLICES(num_slices)					\
-	((num_slices) >= 1 && (num_slices) <= INT16_MAX)
+	((num_slices) >= 1 && (num_slices) <= PG_INT16_MAX)
 
 static int64
 get_validated_integer_interval(Oid coltype, int64 value)
@@ -860,7 +863,7 @@ ts_dimension_set_num_slices(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(1) || !IS_VALID_NUM_SLICES(num_slices_arg))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid number of partitions: must be between 1 and %d", INT16_MAX)));
+				 errmsg("invalid number of partitions: must be between 1 and %d", PG_INT16_MAX)));
 
 	/*
 	 * Our catalog stores num_slices as a smallint (int16). However, function
@@ -979,7 +982,7 @@ dimension_validate_info(DimensionInfo *info)
 		if (!IS_VALID_NUM_SLICES(info->num_slices))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("invalid number of partitions: must be between 1 and %d", INT16_MAX)));
+					 errmsg("invalid number of partitions: must be between 1 and %d", PG_INT16_MAX)));
 	}
 	else
 	{
@@ -1128,7 +1131,7 @@ ts_dimension_add(PG_FUNCTION_ARGS)
 }
 
 /* Used as a tuple found function */
-static bool
+static ScanTupleResult
 dimension_rename_schema_name(TupleInfo *ti, void *data)
 {
 	HeapTuple	tuple = heap_copytuple(ti->tuple);
@@ -1138,8 +1141,8 @@ dimension_rename_schema_name(TupleInfo *ti, void *data)
 	namestrcpy(&dimension->partitioning_func_schema, (const char *) data);
 	catalog_update(ti->scanrel, tuple);
 	heap_freetuple(tuple);
-	/* Return true to keep going */
-	return true;
+
+	return SCAN_CONTINUE;
 }
 
 /* Go through internal dimensions table and rename all relevant schema */

@@ -1,7 +1,16 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <pg_config.h>
 #include <access/xact.h>
+#include <config.h>
+#ifndef WIN32
 #include <access/parallel.h>
+#endif
 #include <commands/extension.h>
 #include <miscadmin.h>
 #include <utils/guc.h>
@@ -36,8 +45,15 @@ post_analyze_hook(ParseState *pstate, Query *query)
 {
 	if (extension_is_loaded())
 		elog(WARNING, "mock post_analyze_hook " STR(TIMESCALEDB_VERSION_MOD));
+
+	/*
+	 * a symbol needed by IsParallelWorker is not exported on windows so we do
+	 * not perform this check
+	 */
+#ifndef WIN32
 	if (prev_post_parse_analyze_hook != NULL && !IsParallelWorker())
 		elog(ERROR, "the extension called with a loader should always have a NULL prev hook");
+#endif
 	if (BROKEN && !creating_extension)
 		elog(ERROR, "mock broken " STR(TIMESCALEDB_VERSION_MOD));
 }
@@ -52,8 +68,15 @@ _PG_init(void)
 	extension_check_version(TIMESCALEDB_VERSION_MOD);
 	elog(WARNING, "mock init " STR(TIMESCALEDB_VERSION_MOD));
 	prev_post_parse_analyze_hook = post_parse_analyze_hook;
+
+	/*
+	 * a symbol needed by IsParallelWorker is not exported on windows so we do
+	 * not perform this check
+	 */
+#ifndef WIN32
 	if (prev_post_parse_analyze_hook != NULL && !IsParallelWorker())
-		elog(ERROR, "the extension loaded with a loader should always have a NULL prev hook");
+		elog(ERROR, "the extension called with a loader should always have a NULL prev hook");
+#endif
 	post_parse_analyze_hook = post_analyze_hook;
 	CacheRegisterRelcacheCallback(cache_invalidate_callback, PointerGetDatum(NULL));
 }

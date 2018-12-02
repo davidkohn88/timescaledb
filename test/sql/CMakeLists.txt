@@ -1,6 +1,5 @@
 set(TEST_FILES
   agg_bookends.sql
-  alternate_users.sql
   alter.sql
   append.sql
   append_unoptimized.sql
@@ -73,12 +72,20 @@ if (CMAKE_BUILD_TYPE MATCHES Debug)
   endif (USE_OPENSSL)
 endif (CMAKE_BUILD_TYPE MATCHES Debug)
 
-if (${PG_VERSION_MAJOR} EQUAL "10")
+if (${PG_VERSION_MAJOR} GREATER "10")
+
+  list(APPEND TEST_FILES
+      generated_as_identity.sql
+      alternate_users-11.sql
+    rowsecurity-11.sql)
+elseif (${PG_VERSION_MAJOR} GREATER "9")
   list(APPEND TEST_FILES
     generated_as_identity.sql
+    alternate_users.sql
     rowsecurity-10.sql)
 else()
   list(APPEND TEST_FILES
+    alternate_users.sql
     rowsecurity-9.6.sql)
 endif ()
 

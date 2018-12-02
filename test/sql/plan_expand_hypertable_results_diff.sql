@@ -1,3 +1,8 @@
+-- Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+--
+-- This file is licensed under the Apache License,
+-- see LICENSE-APACHE at the top level directory.
+
 \set ECHO errors
 \set TEST_BASE_NAME plan_expand_hypertable
 SELECT format('include/%s_load.sql', :'TEST_BASE_NAME') as "TEST_LOAD_NAME",
@@ -16,7 +21,7 @@ RESET client_min_messages;
 \o
 
 --generate the results into two different files
-SET client_min_messages = 'fatal';
+SET client_min_messages = 'error';
 \set ECHO none
 --make output contain query results
 \set PREFIX ''

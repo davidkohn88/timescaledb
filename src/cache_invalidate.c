@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <access/xact.h>
 #include <utils/lsyscache.h>
@@ -7,9 +13,11 @@
 #include <miscadmin.h>
 
 #include "catalog.h"
-#include "compat.h"
 #include "extension.h"
 #include "hypertable_cache.h"
+#include "compat.h"
+
+#include "bgw/scheduler.h"
 
 /*
  * Notes on the way cache invalidation works.
@@ -70,6 +78,9 @@ cache_invalidate_callback(Datum arg, Oid relid)
 
 	if (relid == catalog_get_cache_proxy_id(catalog, CACHE_TYPE_HYPERTABLE))
 		hypertable_cache_invalidate_callback();
+
+	if (relid == catalog_get_cache_proxy_id(catalog, CACHE_TYPE_BGW_JOB))
+		bgw_job_cache_invalidate_callback();
 }
 
 TS_FUNCTION_INFO_V1(ts_timescaledb_invalidate_cache);

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <pg_config.h>
 #include <access/xact.h>
@@ -31,6 +37,24 @@
 #include "bgw_interface.h"
 
 /*
+ * Loading process:
+ *
+ *   1. _PG_init starts up cluster-wide background worker stuff, and sets the
+ *      post_parse_analyze_hook (a postgres-defined hook which is called after
+ *      every statement is parsed) to our function post_analyze_hook
+ *   2. When a command is run with timescale not loaded, post_analyze_hook:
+ *        a. Gets the extension version.
+ *        b. Loads the versioned extension.
+ *        c. Grabs the post_parse_analyze_hook from the versioned extension
+ *           (src/init.c:post_analyze_hook) and stores it in
+ *           extension_post_parse_analyze_hook.
+ *        d. Sets the post_parse_analyze_hook back to what it was before we
+ *           loaded the versioned extention (this hook eventually called our
+ *           post_analyze_hook, but may not be our function, for instance, if
+ *           another extension is loaded).
+ *        e. Calls extension_post_parse_analyze_hook.
+ *        f. Calls the prev_post_parse_analyze_hook.
+ *
  * Some notes on design:
  *
  * We do not check for the installation of the extension upon loading the extension and instead rely on a hook for two reasons:
@@ -103,6 +127,9 @@ inval_cache_callback(Datum arg, Oid relid)
 static bool
 drop_statement_drops_extension(DropStmt *stmt)
 {
+	if (!extension_exists())
+		return false;
+
 	if (stmt->removeType == OBJECT_EXTENSION)
 	{
 		if (list_length(stmt->objects) == 1)
@@ -172,6 +199,9 @@ drop_owned_statement_drops_extension(DropOwnedStmt *stmt)
 	Oid			extension_owner_oid;
 	List	   *role_ids;
 	ListCell   *lc;
+
+	if (!extension_exists())
+		return false;
 
 	Assert(IsTransactionState());
 	extension_owner_oid = extension_owner();
@@ -288,6 +318,11 @@ load_utility_cmd(Node *utility_stmt)
 static void
 stop_workers_on_db_drop(DropdbStmt *drop_db_statement)
 {
+	/*
+	 * Don't check if extension exists here because even though the current
+	 * database might not have TimescaleDB installed the database we are
+	 * dropping might.
+	 */
 	Oid			dropped_db_oid = get_database_oid(drop_db_statement->dbname, drop_db_statement->missing_ok);
 
 	if (dropped_db_oid != InvalidOid)
@@ -465,6 +500,12 @@ do_load()
 	old_hook = post_parse_analyze_hook;
 	post_parse_analyze_hook = NULL;
 
+	/*
+	 * We want to call the post_parse_analyze_hook from the versioned
+	 * extension after we've loaded the versioned so. When the file is loaded
+	 * it sets post_parse_analyze_hook, which we capture and store in
+	 * extension_post_parse_analyze_hook to call at the end _PG_init
+	 */
 	PG_TRY();
 	{
 		load_file(soname, false);

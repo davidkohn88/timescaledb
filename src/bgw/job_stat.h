@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #ifndef BGW_JOB_STAT_H
 #define BGW_JOB_STAT_H
 
@@ -16,6 +22,7 @@ typedef enum JobResult
 } JobResult;
 
 extern BgwJobStat *bgw_job_stat_find(int job_id);
+extern void bgw_job_stat_delete(int job_id);
 extern void bgw_job_stat_mark_start(int32 bgw_job_id);
 extern void bgw_job_stat_mark_end(BgwJob *job, JobResult result);
 extern bool bgw_job_stat_end_was_marked(BgwJobStat *jobstat);

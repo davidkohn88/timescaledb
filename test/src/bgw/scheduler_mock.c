@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 
 #include <miscadmin.h>
@@ -100,11 +106,13 @@ ts_bgw_db_scheduler_test_main(PG_FUNCTION_ARGS)
 
 	elog(WARNING, "running a test in the background: db=%d ttl=%d", db_oid, ttl);
 
-	BackgroundWorkerInitializeConnectionByOid(db_oid, InvalidOid);
+	BackgroundWorkerInitializeConnectionByOidComp(db_oid, InvalidOid);
 
 	StartTransactionCommand();
 	params_get();
+	initialize_timer_latch();
 	CommitTransactionCommand();
+
 	bgw_log_set_application_name("DB Scheduler");
 	register_emit_log_hook();
 

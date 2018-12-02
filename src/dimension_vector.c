@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include "dimension_vector.h"
 
 static int
@@ -68,6 +74,20 @@ dimension_vec_add_slice(DimensionVec **vecptr, DimensionSlice *slice)
 
 	vec->slices[vec->num_slices++] = slice;
 
+	return vec;
+}
+
+DimensionVec *
+dimension_vec_add_unique_slice(DimensionVec **vecptr, DimensionSlice *slice)
+{
+	DimensionVec *vec = *vecptr;
+
+	int32		existing_slice_index = dimension_vec_find_slice_index(vec, slice->fd.id);
+
+	if (existing_slice_index == -1)
+	{
+		return dimension_vec_add_slice(vecptr, slice);
+	}
 	return vec;
 }
 

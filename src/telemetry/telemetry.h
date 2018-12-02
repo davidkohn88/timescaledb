@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #ifndef TIMESCALEDB_TELEMETRY_TELEMETRY_H
 #define TIMESCALEDB_TELEMETRY_TELEMETRY_H
 #include <postgres.h>
@@ -5,11 +11,11 @@
 #include <pg_config.h> // To get USE_OPENSSL from postgres build
 #include <utils/builtins.h>
 
-#include "compat.h"
 #include "version.h"
 #include "net/conn.h"
 #include "net/http.h"
 #include "utils.h"
+#include "compat.h"
 
 #define TELEMETRY_SCHEME "https"
 #define TELEMETRY_HOST "telemetry.timescale.com"

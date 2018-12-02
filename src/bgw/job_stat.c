@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <access/xact.h>
 
@@ -30,15 +36,18 @@ bgw_job_stat_next_start_was_set(FormData_bgw_job_stat *fd)
 }
 
 
-static bool
+static ScanTupleResult
 bgw_job_stat_tuple_found(TupleInfo *ti, void *const data)
 {
 	BgwJobStat **job_stat_pp = data;
 
 	*job_stat_pp = bgw_job_stat_from_tuple(ti->tuple, ti->mctx);
 
-	/* return true because used with scan_one */
-	return true;
+	/*
+	 * Return SCAN_CONTINUE because we check for multiple tuples as an error
+	 * condition.
+	 */
+	return SCAN_CONTINUE;
 }
 
 static bool
@@ -83,6 +92,20 @@ bgw_job_stat_find(int32 bgw_job_id)
 	return job_stat;
 }
 
+static ScanTupleResult
+bgw_job_stat_tuple_delete(TupleInfo *ti, void *const data)
+{
+	catalog_delete(ti->scanrel, ti->tuple);
+
+	return SCAN_CONTINUE;
+}
+
+void
+bgw_job_stat_delete(int32 bgw_job_id)
+{
+	bgw_job_stat_scan_job_id(bgw_job_id, bgw_job_stat_tuple_delete, NULL, NULL, RowExclusiveLock);
+}
+
 /* Mark the start of a job. This should be done in a separate transaction by the scheduler
 *  before the bgw for a job is launched. This ensures that the job is counted as started
 * before /any/ job specific code is executed. A job that has been started but never ended
@@ -90,7 +113,7 @@ bgw_job_stat_find(int32 bgw_job_id)
 * instance can write once a crash happened in any job. Therefore our only choice is to deduce
 * a crash from the lack of a write (the marked end write in this case).
 */
-static bool
+static ScanTupleResult
 bgw_job_stat_tuple_mark_start(TupleInfo *ti, void *const data)
 {
 	HeapTuple	tuple = heap_copytuple(ti->tuple);
@@ -123,8 +146,7 @@ bgw_job_stat_tuple_mark_start(TupleInfo *ti, void *const data)
 	catalog_update(ti->scanrel, tuple);
 	heap_freetuple(tuple);
 
-	/* scans with catalog_update must return false */
-	return false;
+	return SCAN_DONE;
 }
 
 
@@ -140,9 +162,9 @@ TimestampTz
 calculate_next_start_on_success(TimestampTz last_finish, BgwJob *job)
 {
 	/* TODO: add randomness here? Do we need a range or just a percent? */
-	TimestampTz ts = DirectFunctionCall2(timestamptz_pl_interval,
-										 TimestampTzGetDatum(last_finish),
-										 IntervalPGetDatum(&job->fd.schedule_interval));
+	TimestampTz ts = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_pl_interval,
+															 TimestampTzGetDatum(last_finish),
+															 IntervalPGetDatum(&job->fd.schedule_interval)));
 
 	return ts;
 }
@@ -185,7 +207,7 @@ calculate_next_start_on_crash(int consecutive_crashes, BgwJob *job)
 	return failure_calc;
 }
 
-static bool
+static ScanTupleResult
 bgw_job_stat_tuple_mark_end(TupleInfo *ti, void *const data)
 {
 	JobResultCtx *result_ctx = data;
@@ -227,11 +249,10 @@ bgw_job_stat_tuple_mark_end(TupleInfo *ti, void *const data)
 	catalog_update(ti->scanrel, tuple);
 	heap_freetuple(tuple);
 
-	/* scans with catalog_update must return false */
-	return false;
+	return SCAN_DONE;
 }
 
-static bool
+static ScanTupleResult
 bgw_job_stat_tuple_set_next_start(TupleInfo *ti, void *const data)
 {
 	TimestampTz *next_start = data;
@@ -243,8 +264,7 @@ bgw_job_stat_tuple_set_next_start(TupleInfo *ti, void *const data)
 	catalog_update(ti->scanrel, tuple);
 	heap_freetuple(tuple);
 
-	/* scans with catalog_update must return false */
-	return false;
+	return SCAN_DONE;
 }
 
 static bool

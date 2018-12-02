@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <catalog/pg_namespace.h>
 #include <catalog/namespace.h>
@@ -180,7 +186,7 @@ const static InternalFunctionDef internal_function_definitions[_MAX_INTERNAL_FUN
  * sql/cache.sql */
 static const char *cache_proxy_table_names[_MAX_CACHE_TYPES] = {
 	[CACHE_TYPE_HYPERTABLE] = "cache_inval_hypertable",
-	[CACHE_TYPE_CHUNK] = "cache_inval_chunk",
+	[CACHE_TYPE_BGW_JOB] = "cache_inval_bgw_job",
 };
 
 /* Catalog information for the current database. */
@@ -558,6 +564,10 @@ catalog_invalidate_cache(Oid catalog_relid, CmdType operation)
 		case HYPERTABLE:
 		case DIMENSION:
 			relid = catalog_get_cache_proxy_id(catalog, CACHE_TYPE_HYPERTABLE);
+			CacheInvalidateRelcacheByRelid(relid);
+			break;
+		case BGW_JOB:
+			relid = catalog_get_cache_proxy_id(catalog, CACHE_TYPE_BGW_JOB);
 			CacheInvalidateRelcacheByRelid(relid);
 			break;
 		case CHUNK_INDEX:

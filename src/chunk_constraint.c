@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <utils/hsearch.h>
 #include <utils/relcache.h>
@@ -9,7 +15,6 @@
 #include <access/xact.h>
 #include <catalog/indexing.h>
 #include <catalog/pg_constraint.h>
-#include <catalog/pg_constraint_fn.h>
 #include <catalog/objectaddress.h>
 #include <commands/tablecmds.h>
 #include <catalog/dependency.h>
@@ -26,6 +31,12 @@
 #include "hypertable.h"
 #include "errors.h"
 #include "process_utility.h"
+#include "compat.h"
+#if PG11
+/* removed */
+#else
+#include <catalog/pg_constraint_fn.h>
+#endif
 
 #define DEFAULT_EXTRA_CONSTRAINTS_SIZE 4
 
@@ -344,13 +355,16 @@ chunk_constraints_create(ChunkConstraints *ccs,
 /*
  * Scan filter function for only getting dimension constraints.
  */
-static bool
+static ScanFilterResult
 chunk_constraint_for_dimension_slice(TupleInfo *ti, void *data)
 {
-	return !heap_attisnull(ti->tuple, Anum_chunk_constraint_dimension_slice_id);
+	if (heap_attisnull(ti->tuple, Anum_chunk_constraint_dimension_slice_id))
+		return SCAN_EXCLUDE;
+
+	return SCAN_INCLUDE;
 }
 
-static bool
+static ScanTupleResult
 chunk_constraint_tuple_found(TupleInfo *ti, void *data)
 {
 	ChunkConstraints *ccs = data;
@@ -358,7 +372,7 @@ chunk_constraint_tuple_found(TupleInfo *ti, void *data)
 	if (NULL != ccs)
 		chunk_constraints_add_from_tuple(ccs, ti);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 static int
@@ -366,7 +380,7 @@ chunk_constraint_scan_internal(int indexid,
 							   ScanKeyData *scankey,
 							   int nkeys,
 							   tuple_found_func tuple_found,
-							   tuple_found_func tuple_filter,
+							   tuple_filter_func tuple_filter,
 							   void *data,
 							   LOCKMODE lockmode,
 							   MemoryContext mctx)
@@ -394,7 +408,7 @@ chunk_constraint_scan_internal(int indexid,
 static int
 chunk_constraint_scan_by_chunk_id_internal(int32 chunk_id,
 										   tuple_found_func tuple_found,
-										   tuple_found_func tuple_filter,
+										   tuple_filter_func tuple_filter,
 										   void *data,
 										   LOCKMODE lockmode,
 										   MemoryContext mctx)
@@ -421,7 +435,7 @@ static int
 chunk_constraint_scan_by_chunk_id_constraint_name_internal(int32 chunk_id,
 														   const char *constraint_name,
 														   tuple_found_func tuple_found,
-														   tuple_found_func tuple_filter,
+														   tuple_filter_func tuple_filter,
 														   void *data,
 														   LOCKMODE lockmode)
 {
@@ -480,7 +494,7 @@ typedef struct ChunkConstraintScanData
 	DimensionSlice *slice;
 } ChunkConstraintScanData;
 
-static bool
+static ScanTupleResult
 chunk_constraint_dimension_slice_id_tuple_found(TupleInfo *ti, void *data)
 {
 	ChunkConstraintScanData *ccsd = data;
@@ -510,9 +524,9 @@ chunk_constraint_dimension_slice_id_tuple_found(TupleInfo *ti, void *data)
 
 	if (scanctx->early_abort &&
 		chunk->constraints->num_dimension_constraints == hs->num_dimensions)
-		return false;
+		return SCAN_DONE;
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 static int
@@ -684,7 +698,7 @@ typedef struct GetNameFromHypertableConstraintInfo
  *
  * Optionally, the data argument is a ConstraintInfo.
  */
-static bool
+static ScanTupleResult
 chunk_constraint_delete_tuple(TupleInfo *ti, void *data)
 {
 	ConstraintInfo *info = data;
@@ -720,10 +734,11 @@ chunk_constraint_delete_tuple(TupleInfo *ti, void *data)
 
 	if (info->drop_constraint && OidIsValid(constrobj.objectId))
 		performDeletion(&constrobj, DROP_RESTRICT, 0);
-	return true;
+
+	return SCAN_CONTINUE;
 }
 
-static bool
+static ScanFilterResult
 hypertable_constraint_tuple_filter(TupleInfo *ti, void *data)
 {
 	ConstraintInfo *info = data;
@@ -734,12 +749,15 @@ hypertable_constraint_tuple_filter(TupleInfo *ti, void *data)
 	heap_deform_tuple(ti->tuple, ti->desc, values, nulls);
 
 	if (nulls[AttrNumberGetAttrOffset(Anum_chunk_constraint_hypertable_constraint_name)])
-		return false;
+		return SCAN_EXCLUDE;
 
 	constrname = NameStr(*DatumGetName(values[AttrNumberGetAttrOffset(Anum_chunk_constraint_hypertable_constraint_name)]));
 
-	return NULL != info->hypertable_constraint_name &&
-		strcmp(info->hypertable_constraint_name, constrname) == 0;
+	if (NULL != info->hypertable_constraint_name &&
+		strcmp(info->hypertable_constraint_name, constrname) == 0)
+		return SCAN_INCLUDE;
+
+	return SCAN_EXCLUDE;
 }
 
 int
@@ -851,7 +869,7 @@ chunk_constraint_rename_on_chunk_table(int32 chunk_id, char *old_name, char *new
 	RenameConstraint(&rename);
 }
 
-static bool
+static ScanTupleResult
 chunk_constraint_rename_hypertable_tuple(TupleInfo *ti, void *data)
 {
 	RenameHypertableConstraintInfo *info = data;
@@ -890,7 +908,7 @@ chunk_constraint_rename_hypertable_tuple(TupleInfo *ti, void *data)
 	catalog_update(ti->scanrel, tuple);
 	heap_freetuple(tuple);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 int
@@ -911,7 +929,7 @@ chunk_constraint_rename_hypertable_constraint(int32 chunk_id, const char *oldnam
 													  CurrentMemoryContext);
 }
 
-static bool
+static ScanTupleResult
 chunk_constraint_get_name_from_hypertable_tuple(TupleInfo *ti, void *data)
 {
 	GetNameFromHypertableConstraintInfo *info = data;
@@ -919,11 +937,10 @@ chunk_constraint_get_name_from_hypertable_tuple(TupleInfo *ti, void *data)
 	bool		nulls[Natts_chunk_constraint];
 	Datum		values[Natts_chunk_constraint];
 
-
 	heap_deform_tuple(ti->tuple, ti->desc, values, nulls);
 	info->chunk_constraint_name = DatumGetName(values[AttrNumberGetAttrOffset(Anum_chunk_constraint_constraint_name)]);
 
-	return false;
+	return SCAN_DONE;
 }
 
 char *

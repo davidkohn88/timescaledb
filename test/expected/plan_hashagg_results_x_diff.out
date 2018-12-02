@@ -1,4 +1,10 @@
+-- Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+--
+-- This file is licensed under the Apache License,
+-- see LICENSE-APACHE at the top level directory.
 \set ECHO errors
+psql:include/plan_hashagg_query.sql:61: ERROR:  timestamp units "invalid" not recognized
+psql:include/plan_hashagg_query.sql:61: ERROR:  timestamp units "invalid" not recognized
  ?column? 
 ----------
  Done

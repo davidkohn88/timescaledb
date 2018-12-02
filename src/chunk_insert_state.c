@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 
 #include <utils/rel.h>
@@ -14,6 +20,8 @@
 #include <miscadmin.h>
 #include <parser/parsetree.h>
 #include <rewrite/rewriteManip.h>
+#include <nodes/makefuncs.h>
+#include <catalog/pg_type.h>
 
 #include "errors.h"
 #include "chunk_insert_state.h"
@@ -201,9 +209,16 @@ create_chunk_result_relation_info(ChunkDispatch *dispatch, Relation rel, Index r
 	rri->ri_WithCheckOptionExprs = rri_orig->ri_WithCheckOptionExprs;
 	rri->ri_junkFilter = rri_orig->ri_junkFilter;
 	rri->ri_projectReturning = rri_orig->ri_projectReturning;
-	rri->ri_onConflictSetProj = rri_orig->ri_onConflictSetProj;
-	rri->ri_onConflictSetWhere = rri_orig->ri_onConflictSetWhere;
-
+#if PG11
+    if ( rri_orig->ri_onConflict != NULL) {
+        rri->ri_onConflict =  makeNode(OnConflictSetState);
+        rri->ri_onConflictSetProj = rri_orig->ri_onConflictSetProj;
+        rri->ri_onConflictSetWhere = rri_orig->ri_onConflictSetWhere;
+    }
+#else
+    rri->ri_onConflictSetProj = rri_orig->ri_onConflictSetProj;
+    rri->ri_onConflictSetWhere = rri_orig->ri_onConflictSetWhere;
+#endif
 	create_chunk_rri_constraint_expr(rri, rel);
 
 	return rri;
@@ -246,67 +261,92 @@ get_adjusted_onconflictupdate_where(ExprState *hyper_where_state, List *where_qu
 #endif
 }
 
+/*
+ * adjust_hypertable_tlist - from Postgres source code `adjust_partition_tlist`
+ *		Adjust the targetlist entries for a given chunk to account for
+ *		attribute differences between hypertable and the chunk
+ *
+ * The expressions have already been fixed, but here we fix the list to make
+ * target resnos match the chunk's attribute numbers.  This results in a
+ * copy of the original target list in which the entries appear in resno
+ * order, including both the existing entries (that may have their resno
+ * changed in-place) and the newly added entries for columns that don't exist
+ * in the parent.
+ *
+ * Scribbles on the input tlist's entries resno so be aware.
+ */
+static List *
+adjust_hypertable_tlist(List *tlist, TupleConversionMap *map)
+{
+	List	   *new_tlist = NIL;
+	TupleDesc	chunk_tupdesc = map->outdesc;
+	AttrNumber *attrMap = map->attrMap;
+	AttrNumber	chunk_attrno;
+
+	for (chunk_attrno = 1; chunk_attrno <= chunk_tupdesc->natts; chunk_attrno++)
+	{
+		Form_pg_attribute att_tup = TupleDescAttrCompat(chunk_tupdesc, chunk_attrno - 1);
+		TargetEntry *tle;
+
+		if (attrMap[chunk_attrno - 1] != InvalidAttrNumber)
+		{
+			Assert(!att_tup->attisdropped);
+
+			/*
+			 * Use the corresponding entry from the parent's tlist, adjusting
+			 * the resno the match the partition's attno.
+			 */
+			tle = (TargetEntry *) list_nth(tlist, attrMap[chunk_attrno - 1] - 1);
+			if (namestrcmp(&att_tup->attname, tle->resname) != 0)
+				elog(ERROR, "invalid translation of ON CONFLICT update statements");
+			tle->resno = chunk_attrno;
+		}
+		else
+		{
+			Const	   *expr;
+
+			/*
+			 * For a dropped attribute in the partition, generate a dummy
+			 * entry with resno matching the partition's attno.
+			 */
+			Assert(att_tup->attisdropped);
+			expr = makeConst(INT4OID,
+							 -1,
+							 InvalidOid,
+							 sizeof(int32),
+							 (Datum) 0,
+							 true,	/* isnull */
+							 true /* byval */ );
+			tle = makeTargetEntry((Expr *) expr,
+								  chunk_attrno,
+								  pstrdup(NameStr(att_tup->attname)),
+								  false);
+		}
+		new_tlist = lappend(new_tlist, tle);
+	}
+	return new_tlist;
+}
+
 static ProjectionInfo *
-get_adjusted_projection_info_onconflicupdate(ProjectionInfo *orig, List *update_tles, AttrNumber *map,
-											 int map_size, Index varno, Oid rowtype,
-											 TupleDesc chunk_desc)
+get_adjusted_projection_info_onconflicupdate(ProjectionInfo *orig, List *update_tles, AttrNumber *variable_attnos_map,
+											 int variable_attnos_map_size, Index varno, Oid rowtype,
+											 TupleDesc chunk_desc, TupleConversionMap *hypertable_to_chunk_map)
 {
 	bool		found_whole_row;
-	int			i;
-	ListCell   *lc,
-			   *prev,
-			   *next;
 
 	Assert(update_tles != NIL);
+	/* copy the tles so as not to scribble on the hypertable tles */
+	update_tles = copyObject(update_tles);
+
 	/* map hypertable attnos -> chunk attnos for the hypertable */
-	update_tles = (List *) map_variable_attnos_compat((Node *) update_tles, varno, 0, map, map_size,
+	update_tles = (List *) map_variable_attnos_compat((Node *) update_tles, varno, 0, variable_attnos_map, variable_attnos_map_size,
 													  rowtype, &found_whole_row);
 	/* map hypertable attnos -> chunk attnos for the "excluded" table */
-	update_tles = (List *) map_variable_attnos_compat((Node *) update_tles, INNER_VAR, 0, map, map_size,
+	update_tles = (List *) map_variable_attnos_compat((Node *) update_tles, INNER_VAR, 0, variable_attnos_map, variable_attnos_map_size,
 													  rowtype, &found_whole_row);
 
 
-	Assert(list_length(update_tles) == map_size);
-
-	/*
-	 * delete any hypertable tle entries for which there are no chunk
-	 * attributes. This can happen for dropped columns that exist on the
-	 * hyperable but not on the chunks.
-	 */
-	lc = list_head(update_tles);
-	prev = NULL;
-	for (i = 0; i < map_size; i++)
-	{
-		AttrNumber	att = map[i];
-
-		next = lnext(lc);
-
-		if (att == InvalidAttrNumber)
-			update_tles = list_delete_cell(update_tles, lc, prev);
-		else
-			prev = lc;
-		lc = next;
-	}
-
-	/*
-	 * Double-check that the TLE is in the same order as the chunk attributes
-	 * and also fix up the TLE resno after the deletes above
-	 */
-	i = 0;
-	foreach(lc, update_tles)
-	{
-		TargetEntry *t = lfirst(lc);
-		Form_pg_attribute attribute;
-
-		Assert(i < chunk_desc->natts);
-		attribute = chunk_desc->attrs[i];
-
-		if (namestrcmp(&attribute->attname, t->resname) != 0)
-			elog(ERROR, "invalid translation of ON CONFLICT update statements");
-
-		t->resno = i + 1;
-		i++;
-	}
+	update_tles = adjust_hypertable_tlist(update_tles, hypertable_to_chunk_map);
 
 	/* set the projection result slot to the chunk schema */
 	ExecSetSlotDescriptor(get_projection_info_slot_compat(orig), chunk_desc);
@@ -348,7 +388,7 @@ adjust_projections(ChunkInsertState *cis, ChunkDispatch *dispatch, Oid rowtype)
 												   chunk_desc);
 	}
 
-	if (rri->ri_onConflictSetProj != NULL)
+	if (ri_isvalid(rri) && rri->ri_onConflictSetProj != NULL)
 	{
 		rri->ri_onConflictSetProj =
 			get_adjusted_projection_info_onconflicupdate(rri->ri_onConflictSetProj,
@@ -357,7 +397,7 @@ adjust_projections(ChunkInsertState *cis, ChunkDispatch *dispatch, Oid rowtype)
 														 variable_attnos_map_size,
 														 dispatch->hypertable_result_rel_info->ri_RangeTableIndex,
 														 rowtype,
-														 chunk_desc);
+														 chunk_desc, cis->tup_conv_map);
 
 		if (rri->ri_onConflictSetWhere != NULL)
 		{
@@ -486,7 +526,7 @@ chunk_insert_state_create(Chunk *chunk, ChunkDispatch *dispatch)
 
 	/* Need a tuple table slot to store converted tuples */
 	if (state->tup_conv_map)
-		state->slot = MakeTupleTableSlot();
+		state->slot = MakeTupleTableSlotComp();
 
 	heap_close(parent_rel, AccessShareLock);
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <catalog/namespace.h>
 #include <catalog/pg_trigger.h>
@@ -34,13 +40,20 @@
 #include "compat.h"
 #include "utils.h"
 
-typedef bool (*on_chunk_func) (ChunkScanCtx *ctx, Chunk *chunk);
+/* Used when processing scanned chunks */
+typedef enum ChunkResult
+{
+	CHUNK_DONE,
+	CHUNK_IGNORED,
+	CHUNK_PROCESSED
+} ChunkResult;
+
+typedef ChunkResult (*on_chunk_func) (ChunkScanCtx *ctx, Chunk *chunk);
 
 static void chunk_scan_ctx_init(ChunkScanCtx *ctx, Hyperspace *hs, Point *p);
 static void chunk_scan_ctx_destroy(ChunkScanCtx *ctx);
 static void chunk_collision_scan(ChunkScanCtx *scanctx, Hypercube *cube);
 static int	chunk_scan_ctx_foreach_chunk(ChunkScanCtx *ctx, on_chunk_func on_chunk, uint16 limit);
-
 
 static void
 chunk_insert_relation(Relation rel, Chunk *chunk)
@@ -136,11 +149,12 @@ chunk_fill(Chunk *chunk, HeapTuple tuple)
  * alignment in a particular dimension. Thus, if a chunk has an overlapping
  * slice in an aligned dimension, we cut to not overlap with that slice.
  */
-static bool
+static ChunkResult
 do_dimension_alignment(ChunkScanCtx *scanctx, Chunk *chunk)
 {
 	Hypercube  *cube = scanctx->data;
 	Hyperspace *space = scanctx->space;
+	ChunkResult res = CHUNK_IGNORED;
 	int			i;
 
 	for (i = 0; i < space->num_dimensions; i++)
@@ -170,10 +184,13 @@ do_dimension_alignment(ChunkScanCtx *scanctx, Chunk *chunk)
 		 */
 		if (!dimension_slices_equal(cube_slice, chunk_slice) &&
 			dimension_slices_collide(cube_slice, chunk_slice))
+		{
 			dimension_slice_cut(cube_slice, chunk_slice, coord);
+			res = CHUNK_PROCESSED;
+		}
 	}
 
-	return true;
+	return res;
 }
 
 /*
@@ -235,16 +252,17 @@ calculate_and_set_new_chunk_interval(Hypertable *ht, Point *p)
  * slices/constraints that overlap with our tentative hypercube, i.e., they
  * fully collide. We resolve those collisions by cutting the hypercube.
  */
-static bool
+static ChunkResult
 do_collision_resolution(ChunkScanCtx *scanctx, Chunk *chunk)
 {
 	Hypercube  *cube = scanctx->data;
 	Hyperspace *space = scanctx->space;
+	ChunkResult res = CHUNK_IGNORED;
 	int			i;
 
 	if (chunk->cube->num_slices != space->num_dimensions ||
 		!hypercubes_collide(cube, chunk->cube))
-		return true;
+		return CHUNK_IGNORED;
 
 	for (i = 0; i < space->num_dimensions; i++)
 	{
@@ -260,19 +278,20 @@ do_collision_resolution(ChunkScanCtx *scanctx, Chunk *chunk)
 			dimension_slices_collide(cube_slice, chunk_slice))
 		{
 			dimension_slice_cut(cube_slice, chunk_slice, coord);
+			res = CHUNK_PROCESSED;
 
 			/*
 			 * Redo the collision check after each cut since cutting in one
 			 * dimension might have resolved the collision in another
 			 */
 			if (!hypercubes_collide(cube, chunk->cube))
-				return true;
+				return res;
 		}
 	}
 
 	Assert(!hypercubes_collide(cube, chunk->cube));
 
-	return true;
+	return res;
 }
 
 /*-
@@ -392,7 +411,8 @@ set_attoptions(Relation ht_rel, Oid chunk_oid)
 
 	for (attno = 1; attno <= natts; attno++)
 	{
-		Form_pg_attribute attribute = tupleDesc->attrs[attno - 1];
+		Form_pg_attribute attribute = TupleDescAttr(tupleDesc, attno - 1);
+
 		char	   *attributeName = NameStr(attribute->attname);
 		HeapTuple	tuple;
 		Datum		options;
@@ -651,13 +671,13 @@ chunk_create_stub(int32 id, int16 num_constraints)
 }
 
 
-static bool
+static ScanTupleResult
 chunk_tuple_found(TupleInfo *ti, void *arg)
 {
 	Chunk	   *chunk = arg;
 
 	chunk_fill(chunk, ti->tuple);
-	return false;
+	return SCAN_DONE;
 }
 
 void
@@ -832,9 +852,11 @@ chunk_collision_scan(ChunkScanCtx *scanctx, Hypercube *cube)
  * Apply a function to each chunk in the scan context's hash table. If the limit
  * is greater than zero only a limited number of chunks will be processed.
  *
- * The chunk handler function (on_chunk_func) should return true if the chunk
- * should be considered processed and count towards the given limit, otherwise
- * false.
+ * The chunk handler function (on_chunk_func) should return CHUNK_PROCESSED if
+ * the chunk should be considered processed and count towards the given
+ * limit. CHUNK_IGNORE can be returned to have a chunk NOT count towards the
+ * limit. CHUNK_DONE counts the chunk but aborts processing irrespective of
+ * whether the limit is reached or not.
  *
  * Returns the number of processed chunks.
  */
@@ -845,7 +867,7 @@ chunk_scan_ctx_foreach_chunk(ChunkScanCtx *ctx,
 {
 	HASH_SEQ_STATUS status;
 	ChunkScanEntry *entry;
-	uint16		num_found = 0;
+	uint16		num_processed = 0;
 
 	hash_seq_init(&status, ctx->htab);
 
@@ -853,19 +875,27 @@ chunk_scan_ctx_foreach_chunk(ChunkScanCtx *ctx,
 		 entry != NULL;
 		 entry = hash_seq_search(&status))
 	{
-		if (on_chunk(ctx, entry->chunk))
+		switch (on_chunk(ctx, entry->chunk))
 		{
-			num_found++;
-
-			if (limit > 0 && num_found == limit)
-			{
+			case CHUNK_DONE:
+				num_processed++;
 				hash_seq_term(&status);
-				return num_found;
-			}
+				return num_processed;
+			case CHUNK_PROCESSED:
+				num_processed++;
+
+				if (limit > 0 && num_processed == limit)
+				{
+					hash_seq_term(&status);
+					return num_processed;
+				}
+				break;
+			case CHUNK_IGNORED:
+				break;
 		}
 	}
 
-	return num_found;
+	return num_processed;
 }
 
 /* Returns true if the chunk has a full set of constraints, otherwise
@@ -880,15 +910,19 @@ chunk_is_complete(ChunkScanCtx *scanctx, Chunk *chunk)
 	return true;
 }
 
-static bool
+static ChunkResult
 set_complete_chunk(ChunkScanCtx *scanctx, Chunk *chunk)
 {
 	if (chunk_is_complete(scanctx, chunk))
 	{
 		scanctx->data = chunk;
-		return true;
+#ifdef USE_ASSERT_CHECKING
+		return CHUNK_PROCESSED;
+#else
+		return CHUNK_DONE;
+#endif
 	}
-	return false;
+	return CHUNK_IGNORED;
 }
 
 /* Finds the first chunk that has a complete set of constraints. There should be
@@ -899,7 +933,15 @@ chunk_scan_ctx_get_chunk(ChunkScanCtx *ctx)
 {
 	ctx->data = NULL;
 
+#ifdef USE_ASSERT_CHECKING
+	{
+		int			n = chunk_scan_ctx_foreach_chunk(ctx, set_complete_chunk, 0);
+
+		Assert(n == 0 || n == 1);
+	}
+#else
 	chunk_scan_ctx_foreach_chunk(ctx, set_complete_chunk, 1);
+#endif
 
 	return ctx->data;
 }
@@ -963,11 +1005,11 @@ chunk_find(Hyperspace *hs, Point *p)
 	return chunk;
 }
 
-static bool
+static ChunkResult
 append_chunk_oid(ChunkScanCtx *scanctx, Chunk *chunk)
 {
 	if (!chunk_is_complete(scanctx, chunk))
-		return false;
+		return CHUNK_IGNORED;
 
 	/* Fill in the rest of the chunk's data from the chunk table */
 	chunk_fill_stub(chunk, false);
@@ -976,7 +1018,7 @@ append_chunk_oid(ChunkScanCtx *scanctx, Chunk *chunk)
 		LockRelationOid(chunk->table_id, scanctx->lockmode);
 
 	scanctx->data = lappend_oid(scanctx->data, chunk->table_id);
-	return true;
+	return CHUNK_PROCESSED;
 }
 
 List *
@@ -1248,7 +1290,7 @@ chunk_exists_relid(Oid relid)
 	return chunk_get_by_relid(relid, 0, false) != NULL;
 }
 
-static bool
+static ScanTupleResult
 chunk_tuple_delete(TupleInfo *ti, void *data)
 {
 	FormData_chunk *form = (FormData_chunk *) GETSTRUCT(ti->tuple);
@@ -1277,7 +1319,7 @@ chunk_tuple_delete(TupleInfo *ti, void *data)
 	catalog_delete(ti->scanrel, ti->tuple);
 	catalog_restore_user(&sec_ctx);
 
-	return true;
+	return SCAN_CONTINUE;
 }
 
 int
@@ -1321,7 +1363,7 @@ chunk_delete_by_hypertable_id(int32 hypertable_id)
 							   CurrentMemoryContext);
 }
 
-static bool
+static ChunkResult
 chunk_recreate_constraint(ChunkScanCtx *ctx, Chunk *chunk)
 {
 	ChunkConstraints *ccs = chunk->constraints;
@@ -1332,7 +1374,7 @@ chunk_recreate_constraint(ChunkScanCtx *ctx, Chunk *chunk)
 	for (i = 0; i < ccs->num_constraints; i++)
 		chunk_constraint_recreate(&ccs->constraints[i], chunk->table_id);
 
-	return true;
+	return CHUNK_PROCESSED;
 }
 
 void
@@ -1356,7 +1398,7 @@ chunk_recreate_all_constraints_for_dimension(Hyperspace *hs, int32 dimension_id)
 	chunk_scan_ctx_destroy(&chunkctx);
 }
 
-static bool
+static ScanTupleResult
 chunk_tuple_update(TupleInfo *ti, void *data)
 {
 	HeapTuple	tuple = heap_copytuple(ti->tuple);
@@ -1373,7 +1415,7 @@ chunk_tuple_update(TupleInfo *ti, void *data)
 
 	heap_freetuple(tuple);
 
-	return false;
+	return SCAN_DONE;
 }
 
 static bool
@@ -1412,7 +1454,7 @@ chunk_set_schema(Chunk *chunk, const char *newschema)
 }
 
 /* Used as a tuple found function */
-static bool
+static ScanTupleResult
 chunk_rename_schema_name(TupleInfo *ti, void *data)
 {
 	HeapTuple	tuple = heap_copytuple(ti->tuple);
@@ -1422,8 +1464,8 @@ chunk_rename_schema_name(TupleInfo *ti, void *data)
 	namestrcpy(&chunk->schema_name, (char *) data);
 	catalog_update(ti->scanrel, tuple);
 	heap_freetuple(tuple);
-	/* Return true to keep going */
-	return true;
+
+	return SCAN_CONTINUE;
 }
 
 /* Go through the internal chunk table and rename all matching schemas */
@@ -1433,7 +1475,6 @@ chunks_rename_schema_name(char *old_schema, char *new_schema)
 	NameData	old_schema_name;
 	ScanKeyData scankey[1];
 	Catalog    *catalog = catalog_get();
-
 	ScannerCtx	scanctx = {
 		.table = catalog->tables[CHUNK].id,
 		.index = CATALOG_INDEX(catalog, CHUNK, CHUNK_SCHEMA_NAME_INDEX),

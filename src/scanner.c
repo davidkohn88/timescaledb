@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <postgres.h>
 #include <access/relscan.h>
 #include <access/xact.h>
@@ -7,6 +13,12 @@
 #include <utils/tqual.h>
 
 #include "scanner.h"
+
+enum ScannerType
+{
+	ScannerTypeHeap,
+	ScannerTypeIndex,
+};
 
 typedef union ScanDesc
 {
@@ -182,7 +194,7 @@ scanner_scan(ScannerCtx *ctx)
 
 	while (is_valid)
 	{
-		if (ctx->filter == NULL || ctx->filter(&ictx.tinfo, ctx->data))
+		if (ctx->filter == NULL || ctx->filter(&ictx.tinfo, ctx->data) == SCAN_INCLUDE)
 		{
 			ictx.tinfo.count++;
 
@@ -205,7 +217,8 @@ scanner_scan(ScannerCtx *ctx)
 			}
 
 			/* Abort the scan if the handler wants us to */
-			if (ctx->tuple_found != NULL && !ctx->tuple_found(&ictx.tinfo, ctx->data))
+			if (ctx->tuple_found != NULL &&
+				ctx->tuple_found(&ictx.tinfo, ctx->data) == SCAN_DONE)
 				break;
 		}
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #include <stdlib.h>
 #include <unistd.h>
 #include <postgres.h>
@@ -67,7 +73,7 @@ typedef struct DatumValue
 	bool		isnull;
 } DatumValue;
 
-static bool
+static ScanTupleResult
 installation_metadata_tuple_get_value(TupleInfo *ti, void *data)
 {
 	DatumValue *dv = data;
@@ -77,7 +83,7 @@ installation_metadata_tuple_get_value(TupleInfo *ti, void *data)
 	if (!dv->isnull)
 		dv->value = convert_text_to_type(dv->value, dv->typeid);
 
-	return false;
+	return SCAN_DONE;
 }
 
 static Datum

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #ifndef TIMESCALEDB_CATALOG_H
 #define TIMESCALEDB_CATALOG_H
 
@@ -634,7 +640,7 @@ enum
 typedef enum CacheType
 {
 	CACHE_TYPE_HYPERTABLE,
-	CACHE_TYPE_CHUNK,
+	CACHE_TYPE_BGW_JOB,
 	_MAX_CACHE_TYPES
 } CacheType;
 

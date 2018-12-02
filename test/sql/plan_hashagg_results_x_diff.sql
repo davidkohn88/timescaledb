@@ -1,3 +1,8 @@
+-- Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+--
+-- This file is licensed under the Apache License,
+-- see LICENSE-APACHE at the top level directory.
+
 \set ECHO errors
 \o /dev/null
 SET client_min_messages = 'error';
@@ -6,7 +11,7 @@ RESET client_min_messages;
 \o
 
 --generate the results into two different files
-SET client_min_messages = 'fatal';
+SET client_min_messages = 'error';
 \set ECHO none
 --make output contain query results
 \set PREFIX ''

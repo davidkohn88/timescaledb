@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #ifndef TIMESCALEDB_SCANNER_H
 #define TIMESCALEDB_SCANNER_H
 
@@ -6,12 +12,6 @@
 #include <utils/fmgroids.h>
 #include <access/heapam.h>
 #include <nodes/lockoptions.h>
-
-typedef enum ScannerType
-{
-	ScannerTypeHeap,
-	ScannerTypeIndex,
-}			ScannerType;
 
 /* Tuple information passed on to handlers when scanning for tuples. */
 typedef struct TupleInfo
@@ -37,8 +37,20 @@ typedef struct TupleInfo
 	MemoryContext mctx;
 } TupleInfo;
 
-typedef bool (*tuple_found_func) (TupleInfo *ti, void *data);
-typedef bool (*tuple_filter_func) (TupleInfo *ti, void *data);
+typedef enum ScanTupleResult
+{
+	SCAN_DONE,
+	SCAN_CONTINUE
+} ScanTupleResult;
+
+typedef enum ScanFilterResult
+{
+	SCAN_EXCLUDE,
+	SCAN_INCLUDE
+} ScanFilterResult;
+
+typedef ScanTupleResult (*tuple_found_func) (TupleInfo *ti, void *data);
+typedef ScanFilterResult (*tuple_filter_func) (TupleInfo *ti, void *data);
 
 typedef struct ScannerCtx
 {
@@ -76,16 +88,17 @@ typedef struct ScannerCtx
 	void		(*postscan) (int num_tuples, void *data);
 
 	/*
-	 * Optional handler to filter tuples. Should return true for tuples that
-	 * should be passed on to tuple_found, or false otherwise.
+	 * Optional handler to filter tuples. Should return SCAN_INCLUDE for
+	 * tuples that should be passed on to tuple_found, or SCAN_EXCLUDE
+	 * otherwise.
 	 */
-	bool		(*filter) (TupleInfo *ti, void *data);
+	ScanFilterResult (*filter) (TupleInfo *ti, void *data);
 
 	/*
-	 * Handler for found tuples. Should return true to continue the scan or
-	 * false to abort.
+	 * Handler for found tuples. Should return SCAN_CONTINUE to continue the
+	 * scan or SCAN_DONE to finish without scanning further tuples.
 	 */
-	bool		(*tuple_found) (TupleInfo *ti, void *data);
+	ScanTupleResult (*tuple_found) (TupleInfo *ti, void *data);
 } ScannerCtx;
 
 /* Performs an index scan or heap scan and returns the number of matching

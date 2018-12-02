@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2018  Timescale, Inc. All Rights Reserved.
+ *
+ * This file is licensed under the Apache License,
+ * see LICENSE-APACHE at the top level directory.
+ */
 #ifndef TIMESCALEDB_DIMENSION_VECTOR_H
 #define TIMESCALEDB_DIMENSION_VECTOR_H
 
@@ -26,6 +32,7 @@ extern DimensionVec *dimension_vec_create(int32 initial_num_slices);
 extern DimensionVec *dimension_vec_sort(DimensionVec **vec);
 extern DimensionVec *dimension_vec_add_slice_sort(DimensionVec **vec, DimensionSlice *slice);
 extern DimensionVec *dimension_vec_add_slice(DimensionVec **vecptr, DimensionSlice *slice);
+extern DimensionVec *dimension_vec_add_unique_slice(DimensionVec **vecptr, DimensionSlice *slice);
 extern void dimension_vec_remove_slice(DimensionVec **vecptr, int32 index);
 extern DimensionSlice *dimension_vec_find_slice(DimensionVec *vec, int64 coordinate);
 extern int	dimension_vec_find_slice_index(DimensionVec *vec, int32 dimension_slice_id);
