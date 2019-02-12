@@ -45,6 +45,9 @@ extern void _event_trigger_fini(void);
 extern void _conn_plain_init();
 extern void _conn_plain_fini();
 
+extern void _continuous_aggs_cache_inval_init();
+extern void _continuous_aggs_cache_inval_fini();
+
 #ifdef TS_USE_OPENSSL
 extern void _conn_ssl_init();
 extern void _conn_ssl_fini();
@@ -79,6 +82,7 @@ _PG_init(void)
 	_process_utility_init();
 	_guc_init();
 	_conn_plain_init();
+	_continuous_aggs_cache_inval_init();
 #ifdef TS_USE_OPENSSL
 	_conn_ssl_init();
 #endif
@@ -100,6 +104,7 @@ _PG_fini(void)
 #ifdef TS_USE_OPENSSL
 	_conn_ssl_fini();
 #endif
+	_continuous_aggs_cache_inval_fini();
 	_conn_plain_fini();
 	_guc_fini();
 	_process_utility_fini();

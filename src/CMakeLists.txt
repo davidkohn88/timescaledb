@@ -13,6 +13,7 @@ set(SOURCES
   chunk_index.c
   chunk_insert_state.c
   constraint_aware_append.c
+  continuous_aggs_cache_invalidation.c
   cross_module_fn.c
   copy.c
   dimension.c

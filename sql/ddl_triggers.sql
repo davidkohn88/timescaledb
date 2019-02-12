@@ -15,3 +15,7 @@ EXECUTE PROCEDURE _timescaledb_internal.process_ddl_event();
 DROP EVENT TRIGGER IF EXISTS timescaledb_ddl_sql_drop;
 CREATE EVENT TRIGGER timescaledb_ddl_sql_drop ON sql_drop
 EXECUTE PROCEDURE _timescaledb_internal.process_ddl_event();
+
+
+CREATE OR REPLACE FUNCTION _timescaledb_internal.continuous_agg_cache_maintenance() RETURNS TRIGGER 
+AS '@MODULE_PATHNAME@', 'ts_continuous_agg_trigfn' LANGUAGE C;
